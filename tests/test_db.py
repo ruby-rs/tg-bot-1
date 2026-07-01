@@ -82,3 +82,91 @@ def test_add_expense_and_totals_this_month(temp_db):
     totals = temp_db.expense_totals_this_month(user_id)
     assert len(totals) == 1
     assert totals[0]["total"] == 2000.0
+
+
+def test_add_expense_with_fuel_details(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    car_category = next(c for c in temp_db.get_categories(user_id) if c["slug"] == "car")
+    temp_db.add_expense(
+        user_id,
+        car_category["id"],
+        2500.0,
+        note="Лукойл, 35.5 л",
+        liters=35.5,
+        station="Лукойл",
+        payment_method="Карта",
+    )
+
+    with temp_db.get_conn() as conn:
+        row = conn.execute("SELECT * FROM expenses WHERE user_id = ?", (user_id,)).fetchone()
+    assert row["liters"] == 35.5
+    assert row["station"] == "Лукойл"
+    assert row["payment_method"] == "Карта"
+
+
+def test_migrate_adds_missing_expense_columns(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            category_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            note TEXT,
+            logged_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db.init_db(path)
+    with db.get_conn() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()}
+    assert {"liters", "station", "payment_method"} <= columns
+
+
+def test_get_or_create_user_creates_default_habits(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habits = temp_db.get_habits(user_id)
+    assert len(habits) == len(temp_db.DEFAULT_HABITS)
+
+
+def test_toggle_habit_log_cycles_through_states(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit = temp_db.get_habits(user_id)[0]
+    day = "2026-07-01"
+
+    assert temp_db.toggle_habit_log(habit["id"], day) == "done"
+    assert temp_db.toggle_habit_log(habit["id"], day) == "skip"
+    assert temp_db.toggle_habit_log(habit["id"], day) == "none"
+
+
+def test_get_habit_logs_for_date_reflects_status(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit = temp_db.get_habits(user_id)[0]
+    day = "2026-07-01"
+
+    rows = temp_db.get_habit_logs_for_date(user_id, day)
+    assert rows[0]["status"] is None
+
+    temp_db.toggle_habit_log(habit["id"], day)
+    rows = temp_db.get_habit_logs_for_date(user_id, day)
+    assert rows[0]["status"] == "done"
+
+
+def test_get_habit_month_stats_counts_done_only(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit = temp_db.get_habits(user_id)[0]
+
+    temp_db.toggle_habit_log(habit["id"], "2026-07-01")  # done
+    temp_db.toggle_habit_log(habit["id"], "2026-07-02")  # done
+    temp_db.toggle_habit_log(habit["id"], "2026-07-02")  # skip
+    temp_db.toggle_habit_log(habit["id"], "2026-06-15")  # done, different month
+
+    stats = {row["id"]: row for row in temp_db.get_habit_month_stats(user_id, "2026-07")}
+    assert stats[habit["id"]]["done_count"] == 1

@@ -16,6 +16,20 @@ DEFAULT_CATEGORIES = [
     ("vacation", "Отпуск", "🏖"),
 ]
 
+# (slug, title, category)
+DEFAULT_HABITS = [
+    ("water", "Вода 2+ литра", "Здоровье"),
+    ("flat_work", "Работы на квартире", "Стройка"),
+    ("house_work", "Работы на доме", "Стройка"),
+    ("work_shift", "Рабочая смена", "Работа"),
+    ("productive_day", "Продуктивный день", "Работа"),
+    ("mortgage_paid", "Ипотека внесена", "Финансы"),
+    ("budget_ok", "В рамках бюджета", "Финансы"),
+    ("gf_meeting", "Встречи с девушкой", "Отношения и жизнь"),
+    ("events", "Мероприятия", "Отношения и жизнь"),
+    ("car_service", "Обслуживание", "Авто"),
+]
+
 
 def init_db(path: str = None):
     global DB_PATH
@@ -72,6 +86,26 @@ def init_db(path: str = None):
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(category_id) REFERENCES categories(id)
             );
+
+            CREATE TABLE IF NOT EXISTS habits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                slug TEXT NOT NULL,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                sort_order INTEGER NOT NULL,
+                UNIQUE(user_id, slug),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS habit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                habit_id INTEGER NOT NULL,
+                log_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                UNIQUE(habit_id, log_date),
+                FOREIGN KEY(habit_id) REFERENCES habits(id)
+            );
             """
         )
 
@@ -93,6 +127,10 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 def get_or_create_user(tg_id: int, name: str) -> int:
     with get_conn() as conn:
         row = conn.execute("SELECT id FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
@@ -107,6 +145,11 @@ def get_or_create_user(tg_id: int, name: str) -> int:
             conn.execute(
                 "INSERT INTO categories (user_id, slug, title, emoji, sort_order) VALUES (?, ?, ?, ?, ?)",
                 (user_id, slug, title, emoji, order),
+            )
+        for order, (slug, title, category) in enumerate(DEFAULT_HABITS):
+            conn.execute(
+                "INSERT INTO habits (user_id, slug, title, category, sort_order) VALUES (?, ?, ?, ?, ?)",
+                (user_id, slug, title, category, order),
             )
         return user_id
 
@@ -207,6 +250,78 @@ def add_expense(user_id: int, category_id: int, amount: float, note: str = ""):
             "INSERT INTO expenses (user_id, category_id, amount, note, logged_at) VALUES (?, ?, ?, ?, ?)",
             (user_id, category_id, amount, note, now()),
         )
+
+
+def get_habits(user_id: int):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM habits WHERE user_id = ? ORDER BY sort_order", (user_id,)
+        ).fetchall()
+
+
+def get_habit(user_id: int, habit_id: int):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM habits WHERE user_id = ? AND id = ?", (user_id, habit_id)
+        ).fetchone()
+
+
+def get_habit_logs_for_date(user_id: int, log_date: str):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT h.id, h.title, h.category, h.sort_order, hl.status
+            FROM habits h
+            LEFT JOIN habit_logs hl ON hl.habit_id = h.id AND hl.log_date = ?
+            WHERE h.user_id = ?
+            ORDER BY h.sort_order
+            """,
+            (log_date, user_id),
+        ).fetchall()
+
+
+def toggle_habit_log(habit_id: int, log_date: str) -> str:
+    """Cycles a habit's status for a given day: none -> done -> skip -> none."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM habit_logs WHERE habit_id = ? AND log_date = ?",
+            (habit_id, log_date),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO habit_logs (habit_id, log_date, status) VALUES (?, ?, 'done')",
+                (habit_id, log_date),
+            )
+            return "done"
+        if row["status"] == "done":
+            conn.execute(
+                "UPDATE habit_logs SET status = 'skip' WHERE habit_id = ? AND log_date = ?",
+                (habit_id, log_date),
+            )
+            return "skip"
+        conn.execute(
+            "DELETE FROM habit_logs WHERE habit_id = ? AND log_date = ?",
+            (habit_id, log_date),
+        )
+        return "none"
+
+
+def get_habit_month_stats(user_id: int, year_month: str):
+    """year_month in 'YYYY-MM' format. Returns each habit with its done-count this month."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT h.id, h.title, h.category, h.sort_order,
+                   SUM(CASE WHEN hl.status = 'done' THEN 1 ELSE 0 END) AS done_count
+            FROM habits h
+            LEFT JOIN habit_logs hl
+                ON hl.habit_id = h.id AND strftime('%Y-%m', hl.log_date) = ?
+            WHERE h.user_id = ?
+            GROUP BY h.id
+            ORDER BY h.sort_order
+            """,
+            (year_month, user_id),
+        ).fetchall()
 
 
 def expense_totals_this_month(user_id: int):

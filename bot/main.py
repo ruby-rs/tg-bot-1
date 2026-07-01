@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -14,7 +15,7 @@ from telegram.ext import (
 )
 
 from . import db
-from .formatting import escape_md, progress_bar
+from .formatting import escape_md, progress_bar, sparkline, table
 from .tips import NUTRITION_TIPS, WELCOME_TEXT
 
 logging.basicConfig(
@@ -46,34 +47,82 @@ async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = db.get_or_create_user(user.id, user.full_name)
     stats = db.category_stats(user_id)
 
-    lines = [f"📊 *Панель прогресса — {escape_md(user.first_name)}*", ""]
+    today = escape_md(datetime.now().strftime("%d.%m.%Y"))
+    lines = [f"📊 *Панель прогресса* · {escape_md(user.first_name)}", f"_{today}_", ""]
+
+    rows = []
+    total_done = total_all = 0
     for row in stats:
         done = row["done"] or 0
         total = row["total"] or 0
-        bar = escape_md(progress_bar(done, total))
-        lines.append(f"{row['emoji']} *{escape_md(row['title'])}*")
-        lines.append(f"`{bar}`  \\({done}/{total}\\)")
-        lines.append("")
+        total_done += done
+        total_all += total
+        label = f"{row['emoji']} {row['title']}"
+        rows.append((label, progress_bar(done, total, length=8), f"{done}/{total}"))
 
-    weights = db.get_weights(user_id, limit=2)
+    lines.append(f">Всего задач выполнено: *{total_done}/{total_all}*")
+    lines.append("```")
+    lines.append(table(rows))
+    lines.append("```")
+
+    weights = db.get_weights(user_id, limit=7)
     if weights:
-        latest = weights[0]["weight"]
-        line = f"⚖️ Текущий вес: *{escape_md(latest)} кг*"
-        if len(weights) == 2:
-            diff = round(weights[0]["weight"] - weights[1]["weight"], 1)
+        ordered = [w["weight"] for w in reversed(weights)]
+        latest = ordered[-1]
+        line = f"⚖️ Вес: *{escape_md(latest)} кг* `{sparkline(ordered)}`"
+        if len(ordered) >= 2:
+            diff = round(ordered[-1] - ordered[-2], 1)
             sign = "+" if diff >= 0 else ""
-            line += f" \\({escape_md(sign + str(diff))} кг\\)"
-        lines.append(line)
+            line += f"  \\({escape_md(sign + str(diff))}\\)"
         lines.append("")
+        lines.append(line)
 
     expenses = db.expense_totals_this_month(user_id)
     if expenses:
-        lines.append("💸 *Расходы в этом месяце:*")
-        for e in expenses:
-            lines.append(f"{e['emoji']} {escape_md(e['title'])}: *{escape_md(e['total'])}*")
+        exp_rows = [(f"{e['emoji']} {e['title']}", f"{e['total']:.0f}") for e in expenses]
+        exp_total = sum(e["total"] for e in expenses)
+        exp_rows.append(("Итого", f"{exp_total:.0f}"))
+        lines.append("")
+        lines.append("💸 *Расходы в этом месяце*")
+        lines.append("```")
+        lines.append(table(exp_rows))
+        lines.append("```")
 
-    await update.message.reply_text(
-        "\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2
+    buttons = [
+        [InlineKeyboardButton(f"{c['emoji']} {c['title']}", callback_data=f"viewcat:{c['id']}")]
+        for c in db.get_categories(user_id)
+    ]
+    buttons.append(
+        [
+            InlineKeyboardButton("➕ Задача", callback_data="quickadd"),
+            InlineKeyboardButton("💸 Расход", callback_data="quickexp"),
+        ]
+    )
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    await query.message.reply_text(
+        "Выбери категорию для новой задачи:", reply_markup=category_keyboard(user_id, "addcat")
+    )
+
+
+async def quick_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    await query.message.reply_text(
+        "Выбери категорию расхода:", reply_markup=category_keyboard(user_id, "expcat")
     )
 
 
@@ -114,7 +163,12 @@ async def tasks_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"{category['emoji']} {category['title']}: задач пока нет.")
         return
 
-    text_lines = [f"{category['emoji']} *{escape_md(category['title'])}*", ""]
+    done_count = sum(1 for t in tasks if t["status"] == "done")
+    text_lines = [
+        f"{category['emoji']} *{escape_md(category['title'])}*",
+        f"`{escape_md(progress_bar(done_count, len(tasks), length=12))}`  \\({done_count}/{len(tasks)}\\)",
+        "",
+    ]
     buttons = []
     for t in tasks:
         mark = "✅" if t["status"] == "done" else "⬜️"
@@ -126,11 +180,19 @@ async def tasks_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("🗑", callback_data=f"del:{t['id']}"),
                 ]
             )
+    buttons.append([InlineKeyboardButton("◀️ К панели", callback_data="backpanel")])
     await query.edit_message_text(
         "\n".join(text_lines),
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+
+async def back_to_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.delete()
+    await panel(update, context)
 
 
 async def task_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -175,10 +237,16 @@ async def weight_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not weights:
         await update.message.reply_text("Пока нет записей веса. Используй /weight 61.5")
         return
-    lines = ["⚖️ *Динамика веса \\(последние записи\\)*", ""]
-    for w in reversed(weights):
-        date = w["logged_at"][:10]
-        lines.append(f"{escape_md(date)}: *{escape_md(w['weight'])} кг*")
+    ordered = list(reversed(weights))
+    values = [w["weight"] for w in ordered]
+    lines = ["⚖️ *Динамика веса*", ""]
+    lines.append(f"`{sparkline(values)}`")
+    lines.append("```")
+    lines.append(table([(w["logged_at"][:10], f"{w['weight']} кг") for w in ordered]))
+    lines.append("```")
+    change = round(values[-1] - values[0], 1)
+    sign = "+" if change >= 0 else ""
+    lines.append(f"Изменение за период: *{escape_md(sign + str(change))} кг*")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
 
 
@@ -205,14 +273,18 @@ async def expenses_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not totals:
         await update.message.reply_text("В этом месяце расходов ещё не записано. Используй /expense")
         return
-    lines = ["💸 *Расходы за месяц*", ""]
-    for e in totals:
-        lines.append(f"{e['emoji']} {escape_md(e['title'])}: *{escape_md(e['total'])}*")
+    rows = [(f"{e['emoji']} {e['title']}", f"{e['total']:.0f}") for e in totals]
+    rows.append(("Итого", f"{sum(e['total'] for e in totals):.0f}"))
+    lines = ["💸 *Расходы за месяц*", "```", table(rows), "```"]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def tips_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(NUTRITION_TIPS, parse_mode=ParseMode.MARKDOWN_V2)
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(WELCOME_TEXT, parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,12 +332,16 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("expense", expense_start))
     app.add_handler(CommandHandler("expenses", expenses_report))
     app.add_handler(CommandHandler("tips", tips_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
 
     app.add_handler(CallbackQueryHandler(add_category_chosen, pattern=r"^addcat:"))
     app.add_handler(CallbackQueryHandler(tasks_list, pattern=r"^viewcat:"))
     app.add_handler(CallbackQueryHandler(task_done, pattern=r"^done:"))
     app.add_handler(CallbackQueryHandler(task_del, pattern=r"^del:"))
     app.add_handler(CallbackQueryHandler(expense_category_chosen, pattern=r"^expcat:"))
+    app.add_handler(CallbackQueryHandler(quick_add, pattern=r"^quickadd$"))
+    app.add_handler(CallbackQueryHandler(quick_expense, pattern=r"^quickexp$"))
+    app.add_handler(CallbackQueryHandler(back_to_panel, pattern=r"^backpanel$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_text))
 

@@ -21,5 +21,13 @@ python -m bot.main
 - `/expense` — записать расход по категории
 - `/expenses` — расходы за текущий месяц
 - `/tips` — советы по питанию и набору массы
+- `/cancel` — отменить текущее добавление задачи/расхода
 
 Данные хранятся в SQLite (`life_tracker.db` по умолчанию, путь настраивается через `DB_PATH`).
+
+## Тесты
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```

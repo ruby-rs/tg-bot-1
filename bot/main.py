@@ -5,7 +5,7 @@ from collections import OrderedDict
 from datetime import datetime
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -81,12 +81,14 @@ async def send_or_replace(
     context.chat_data[key] = msg.message_id
 
 
-def category_keyboard(user_id: int, prefix: str) -> InlineKeyboardMarkup:
+def category_keyboard(user_id: int, prefix: str, with_back: bool = True) -> InlineKeyboardMarkup:
     cats = db.get_categories(user_id)
     buttons = [
         [InlineKeyboardButton(f"{c['emoji']} {c['title']}", callback_data=f"{prefix}:{c['id']}")]
         for c in cats
     ]
+    if with_back:
+        buttons.append([InlineKeyboardButton("◀️ К панели", callback_data="backpanel")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -141,15 +143,23 @@ def build_panel_view(user_id: int, first_name: str):
         lines.append("```")
 
     buttons = [
-        [InlineKeyboardButton(f"{c['emoji']} {c['title']}", callback_data=f"viewcat:{c['id']}")]
-        for c in db.get_categories(user_id)
-    ]
-    buttons.append(
         [
             InlineKeyboardButton("➕ Задача", callback_data="quickadd"),
             InlineKeyboardButton("💸 Расход", callback_data="quickexp"),
-        ]
-    )
+        ],
+        [
+            InlineKeyboardButton("📋 Категории", callback_data="quicknav:cats"),
+            InlineKeyboardButton("📅 Календарь", callback_data="quicknav:calendar"),
+        ],
+        [
+            InlineKeyboardButton("✅ Привычки", callback_data="quicknav:habits"),
+            InlineKeyboardButton("📊 Расходы", callback_data="quicknav:expenses"),
+        ],
+        [
+            InlineKeyboardButton("⚖️ Вес", callback_data="quicknav:weightstats"),
+            InlineKeyboardButton("🍗 Советы", callback_data="quicknav:tips"),
+        ],
+    ]
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
@@ -703,6 +713,47 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено.")
 
 
+QUICK_NAV_HANDLERS = {
+    "cats": tasks_start,
+    "calendar": calendar_cmd,
+    "habits": habits_cmd,
+    "expenses": expenses_report,
+    "weightstats": weight_stats,
+    "tips": tips_cmd,
+}
+
+
+async def quick_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split(":", 1)[1]
+    handler = QUICK_NAV_HANDLERS.get(action)
+    if handler is not None:
+        await handler(update, context)
+
+
+BOT_COMMANDS = [
+    BotCommand("start", "Начать / зарегистрироваться"),
+    BotCommand("panel", "Панель прогресса"),
+    BotCommand("calendar", "Календарь: привычки и заправки по дням"),
+    BotCommand("add", "Добавить задачу"),
+    BotCommand("tasks", "Список задач по категории"),
+    BotCommand("habits", "Отметить привычки за сегодня"),
+    BotCommand("habitstats", "Статистика привычек за месяц"),
+    BotCommand("weight", "Записать вес"),
+    BotCommand("weightstats", "Динамика веса"),
+    BotCommand("expense", "Записать расход"),
+    BotCommand("expenses", "Расходы за месяц"),
+    BotCommand("tips", "Советы по питанию и набору массы"),
+    BotCommand("cancel", "Отменить текущее действие"),
+    BotCommand("help", "Показать список команд"),
+]
+
+
+async def post_init(app: Application):
+    await app.bot.set_my_commands(BOT_COMMANDS)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled exception while processing update: %s", update, exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
@@ -714,7 +765,7 @@ def build_app() -> Application:
     token = os.environ["BOT_TOKEN"]
     db.init_db(os.environ.get("DB_PATH", "life_tracker.db"))
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel))
@@ -746,6 +797,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(calendar_day_view, pattern=r"^calday:"))
     app.add_handler(CallbackQueryHandler(cal_fuel_start, pattern=r"^calfuelstart:"))
     app.add_handler(CallbackQueryHandler(noop, pattern=r"^noop$"))
+    app.add_handler(CallbackQueryHandler(quick_nav, pattern=r"^quicknav:"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_text))
     app.add_error_handler(error_handler)

@@ -30,6 +30,9 @@ DEFAULT_HABITS = [
     ("car_service", "Обслуживание", "Авто"),
 ]
 
+FUEL_STATIONS = ["Лукойл", "Роснефть", "Нефтьмагистраль", "Тбойл"]
+PAYMENT_METHODS = ["Карта", "Деньги"]
+
 
 def init_db(path: str = None):
     global DB_PATH
@@ -82,6 +85,9 @@ def init_db(path: str = None):
                 category_id INTEGER NOT NULL,
                 amount REAL NOT NULL,
                 note TEXT,
+                liters REAL,
+                station TEXT,
+                payment_method TEXT,
                 logged_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(category_id) REFERENCES categories(id)
@@ -108,6 +114,16 @@ def init_db(path: str = None):
             );
             """
         )
+        _migrate(conn)
+
+
+def _migrate(conn):
+    """Adds columns that may be missing on databases created before they existed."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(expenses)").fetchall()}
+    for column in ("liters", "station", "payment_method"):
+        if column not in existing:
+            column_type = "REAL" if column == "liters" else "TEXT"
+            conn.execute(f"ALTER TABLE expenses ADD COLUMN {column} {column_type}")
 
 
 @contextmanager
@@ -244,11 +260,22 @@ def get_weights(user_id: int, limit: int = 10):
         ).fetchall()
 
 
-def add_expense(user_id: int, category_id: int, amount: float, note: str = ""):
+def add_expense(
+    user_id: int,
+    category_id: int,
+    amount: float,
+    note: str = "",
+    liters: float = None,
+    station: str = None,
+    payment_method: str = None,
+):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO expenses (user_id, category_id, amount, note, logged_at) VALUES (?, ?, ?, ?, ?)",
-            (user_id, category_id, amount, note, now()),
+            """
+            INSERT INTO expenses (user_id, category_id, amount, note, liters, station, payment_method, logged_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, category_id, amount, note, liters, station, payment_method, now()),
         )
 
 

@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 AWAITING_TASK = "awaiting_task_category"
 AWAITING_EXPENSE = "awaiting_expense_category"
+AWAITING_FUEL_STATION = "awaiting_fuel_station"
+AWAITING_FUEL_LITERS = "awaiting_fuel_liters"
+AWAITING_FUEL_AMOUNT = "awaiting_fuel_amount"
+FUEL_DRAFT = "fuel_draft"
 
 HABIT_STATUS_EMOJI = {"done": "✅", "skip": "❌", None: "➖"}
 MAIN_SLOT = "main"
@@ -319,12 +323,84 @@ async def expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def fuel_station_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(name, callback_data=f"fuelstation:{name}")] for name in db.FUEL_STATIONS
+    ]
+    buttons.append([InlineKeyboardButton("✏️ Другая заправка", callback_data="fuelstation:custom")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def payment_method_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(name, callback_data=f"fuelpay:{name}") for name in db.PAYMENT_METHODS]]
+    )
+
+
 async def expense_category_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
     category_id = int(query.data.split(":")[1])
+    category = db.get_category(user_id, category_id)
+    if category is None:
+        await query.edit_message_text("Категория не найдена. Используй /expense ещё раз.")
+        return
+
+    if category["slug"] == "car":
+        context.user_data[FUEL_DRAFT] = {"category_id": category_id}
+        await query.edit_message_text("⛽️ Выбери заправку:", reply_markup=fuel_station_keyboard())
+        return
+
     context.user_data[AWAITING_EXPENSE] = category_id
     await query.edit_message_text("Напиши сумму и комментарий, например: 1500 бензин")
+
+
+async def fuel_station_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if FUEL_DRAFT not in context.user_data:
+        await query.edit_message_text("Сессия истекла. Используй /expense ещё раз.")
+        return
+    station = query.data.split(":", 1)[1]
+    if station == "custom":
+        context.user_data[AWAITING_FUEL_STATION] = True
+        await query.edit_message_text("Напиши название заправки:")
+        return
+    context.user_data[FUEL_DRAFT]["station"] = station
+    context.user_data[AWAITING_FUEL_LITERS] = True
+    await query.edit_message_text(f"⛽️ {station}\nСколько литров залил?")
+
+
+async def fuel_payment_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    draft = context.user_data.pop(FUEL_DRAFT, None)
+    if not draft or "amount" not in draft:
+        await query.answer("Сессия истекла")
+        await query.edit_message_text("Сессия истекла. Используй /expense ещё раз.")
+        return
+    category = db.get_category(user_id, draft["category_id"])
+    if category is None:
+        await query.answer("Категория не найдена")
+        await query.edit_message_text("Категория не найдена. Используй /expense ещё раз.")
+        return
+    payment_method = query.data.split(":", 1)[1]
+    db.add_expense(
+        user_id,
+        draft["category_id"],
+        draft["amount"],
+        note=f"{draft['station']}, {draft['liters']} л",
+        liters=draft["liters"],
+        station=draft["station"],
+        payment_method=payment_method,
+    )
+    await query.answer("Записано!")
+    await query.edit_message_text(
+        f"💸 Заправка {draft['station']}: {draft['liters']} л на {draft['amount']} ₽ ({payment_method})"
+    )
 
 
 async def expenses_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -435,6 +511,48 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Добавлено в {category['emoji']} {category['title']}: {title}")
         return
 
+    if AWAITING_FUEL_STATION in context.user_data:
+        station = update.message.text.strip()
+        if not station:
+            await update.message.reply_text("Название заправки не может быть пустым.")
+            return
+        context.user_data.pop(AWAITING_FUEL_STATION)
+        context.user_data[FUEL_DRAFT]["station"] = station
+        context.user_data[AWAITING_FUEL_LITERS] = True
+        await update.message.reply_text(f"⛽️ {station}\nСколько литров залил?")
+        return
+
+    if AWAITING_FUEL_LITERS in context.user_data:
+        try:
+            liters = float(update.message.text.strip().replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("Введи число литров, например: 35.5")
+            return
+        if not 0 < liters <= 200:
+            await update.message.reply_text("Литры должны быть в диапазоне 0-200.")
+            return
+        context.user_data.pop(AWAITING_FUEL_LITERS)
+        context.user_data[FUEL_DRAFT]["liters"] = liters
+        context.user_data[AWAITING_FUEL_AMOUNT] = True
+        await update.message.reply_text("Сколько это стоило (₽)?")
+        return
+
+    if AWAITING_FUEL_AMOUNT in context.user_data:
+        try:
+            amount = float(update.message.text.strip().replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("Введи сумму числом, например: 2500")
+            return
+        if amount <= 0:
+            await update.message.reply_text("Сумма должна быть больше нуля.")
+            return
+        context.user_data.pop(AWAITING_FUEL_AMOUNT)
+        context.user_data[FUEL_DRAFT]["amount"] = amount
+        await update.message.reply_text(
+            "Как оплатил?", reply_markup=payment_method_keyboard()
+        )
+        return
+
     if AWAITING_EXPENSE in context.user_data:
         category_id = context.user_data.pop(AWAITING_EXPENSE)
         parts = update.message.text.strip().split(maxsplit=1)
@@ -461,6 +579,10 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(AWAITING_TASK, None)
     context.user_data.pop(AWAITING_EXPENSE, None)
+    context.user_data.pop(AWAITING_FUEL_STATION, None)
+    context.user_data.pop(AWAITING_FUEL_LITERS, None)
+    context.user_data.pop(AWAITING_FUEL_AMOUNT, None)
+    context.user_data.pop(FUEL_DRAFT, None)
     await update.message.reply_text("Отменено.")
 
 
@@ -496,6 +618,8 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(task_done, pattern=r"^done:"))
     app.add_handler(CallbackQueryHandler(task_del, pattern=r"^del:"))
     app.add_handler(CallbackQueryHandler(expense_category_chosen, pattern=r"^expcat:"))
+    app.add_handler(CallbackQueryHandler(fuel_station_chosen, pattern=r"^fuelstation:"))
+    app.add_handler(CallbackQueryHandler(fuel_payment_chosen, pattern=r"^fuelpay:"))
     app.add_handler(CallbackQueryHandler(quick_add, pattern=r"^quickadd$"))
     app.add_handler(CallbackQueryHandler(quick_expense, pattern=r"^quickexp$"))
     app.add_handler(CallbackQueryHandler(back_to_panel, pattern=r"^backpanel$"))

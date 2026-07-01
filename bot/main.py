@@ -157,6 +157,9 @@ async def tasks_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = db.get_or_create_user(user.id, user.full_name)
     category_id = int(query.data.split(":")[1])
     category = db.get_category(user_id, category_id)
+    if category is None:
+        await query.edit_message_text("Категория не найдена.")
+        return
     tasks = db.get_tasks(user_id, category_id=category_id)
 
     if not tasks:
@@ -226,6 +229,9 @@ async def weight_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Введи число, например: /weight 61.5")
         return
+    if not 20 <= value <= 300:
+        await update.message.reply_text("Вес должен быть в диапазоне 20-300 кг.")
+        return
     db.log_weight(user_id, value)
     await update.message.reply_text(f"⚖️ Записал вес: {value} кг")
 
@@ -294,8 +300,14 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if AWAITING_TASK in context.user_data:
         category_id = context.user_data.pop(AWAITING_TASK)
         title = update.message.text.strip()
-        db.add_task(user_id, category_id, title)
+        if not title:
+            await update.message.reply_text("Текст задачи не может быть пустым. Используй /add ещё раз.")
+            return
         category = db.get_category(user_id, category_id)
+        if category is None:
+            await update.message.reply_text("Категория не найдена. Используй /add ещё раз.")
+            return
+        db.add_task(user_id, category_id, title)
         await update.message.reply_text(f"✅ Добавлено в {category['emoji']} {category['title']}: {title}")
         return
 
@@ -307,13 +319,31 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError):
             await update.message.reply_text("Не понял сумму. Формат: 1500 бензин")
             return
+        if amount <= 0:
+            await update.message.reply_text("Сумма должна быть больше нуля.")
+            return
+        category = db.get_category(user_id, category_id)
+        if category is None:
+            await update.message.reply_text("Категория не найдена. Используй /expense ещё раз.")
+            return
         note = parts[1] if len(parts) > 1 else ""
         db.add_expense(user_id, category_id, amount, note)
-        category = db.get_category(user_id, category_id)
         await update.message.reply_text(f"💸 Записал {amount} в {category['emoji']} {category['title']}")
         return
 
     await update.message.reply_text("Не понял. Список команд: /start")
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop(AWAITING_TASK, None)
+    context.user_data.pop(AWAITING_EXPENSE, None)
+    await update.message.reply_text("Отменено.")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Unhandled exception while processing update: %s", update, exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text("Произошла ошибка. Попробуй ещё раз.")
 
 
 def build_app() -> Application:
@@ -332,6 +362,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("expense", expense_start))
     app.add_handler(CommandHandler("expenses", expenses_report))
     app.add_handler(CommandHandler("tips", tips_cmd))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("help", help_cmd))
 
     app.add_handler(CallbackQueryHandler(add_category_chosen, pattern=r"^addcat:"))
@@ -344,6 +375,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(back_to_panel, pattern=r"^backpanel$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_text))
+    app.add_error_handler(error_handler)
 
     return app
 

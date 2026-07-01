@@ -268,6 +268,7 @@ def add_expense(
     liters: float = None,
     station: str = None,
     payment_method: str = None,
+    logged_at: str = None,
 ):
     with get_conn() as conn:
         conn.execute(
@@ -275,8 +276,22 @@ def add_expense(
             INSERT INTO expenses (user_id, category_id, amount, note, liters, station, payment_method, logged_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, category_id, amount, note, liters, station, payment_method, now()),
+            (user_id, category_id, amount, note, liters, station, payment_method, logged_at or now()),
         )
+
+
+def get_expenses_for_date(user_id: int, log_date: str):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT e.*, c.title AS category_title, c.emoji AS category_emoji
+            FROM expenses e
+            JOIN categories c ON c.id = e.category_id
+            WHERE e.user_id = ? AND date(e.logged_at) = ?
+            ORDER BY e.logged_at
+            """,
+            (user_id, log_date),
+        ).fetchall()
 
 
 def get_habits(user_id: int):
@@ -349,6 +364,22 @@ def get_habit_month_stats(user_id: int, year_month: str):
             """,
             (year_month, user_id),
         ).fetchall()
+
+
+def get_habit_days_summary(user_id: int, year_month: str):
+    """Returns {log_date: done_count} for days in the given month that have any habit activity."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT hl.log_date, SUM(CASE WHEN hl.status = 'done' THEN 1 ELSE 0 END) AS done_count
+            FROM habit_logs hl
+            JOIN habits h ON h.id = hl.habit_id
+            WHERE h.user_id = ? AND strftime('%Y-%m', hl.log_date) = ?
+            GROUP BY hl.log_date
+            """,
+            (user_id, year_month),
+        ).fetchall()
+        return {row["log_date"]: row["done_count"] for row in rows}
 
 
 def expense_totals_this_month(user_id: int):

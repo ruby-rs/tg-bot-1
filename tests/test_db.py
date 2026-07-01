@@ -130,6 +130,51 @@ def test_migrate_adds_missing_expense_columns(tmp_path):
     assert {"liters", "station", "payment_method"} <= columns
 
 
+def test_add_expense_with_explicit_logged_at(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    car_category = next(c for c in temp_db.get_categories(user_id) if c["slug"] == "car")
+    temp_db.add_expense(
+        user_id,
+        car_category["id"],
+        1000.0,
+        liters=20.0,
+        station="Роснефть",
+        payment_method="Деньги",
+        logged_at="2026-05-15T12:00:00+00:00",
+    )
+
+    entries = temp_db.get_expenses_for_date(user_id, "2026-05-15")
+    assert len(entries) == 1
+    assert entries[0]["station"] == "Роснефть"
+    assert entries[0]["liters"] == 20.0
+
+
+def test_get_expenses_for_date_ignores_other_days(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    category = temp_db.get_categories(user_id)[0]
+    temp_db.add_expense(user_id, category["id"], 100.0, logged_at="2026-05-15T12:00:00+00:00")
+    temp_db.add_expense(user_id, category["id"], 200.0, logged_at="2026-05-16T12:00:00+00:00")
+
+    assert len(temp_db.get_expenses_for_date(user_id, "2026-05-15")) == 1
+    assert len(temp_db.get_expenses_for_date(user_id, "2026-05-16")) == 1
+    assert len(temp_db.get_expenses_for_date(user_id, "2026-05-17")) == 0
+
+
+def test_get_habit_days_summary_counts_done_per_day(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit = temp_db.get_habits(user_id)[0]
+
+    temp_db.toggle_habit_log(habit["id"], "2026-05-01")  # done
+    temp_db.toggle_habit_log(habit["id"], "2026-05-02")  # done
+    temp_db.toggle_habit_log(habit["id"], "2026-05-02")  # skip
+    temp_db.toggle_habit_log(habit["id"], "2026-06-01")  # different month
+
+    summary = temp_db.get_habit_days_summary(user_id, "2026-05")
+    assert summary["2026-05-01"] == 1
+    assert summary["2026-05-02"] == 0
+    assert "2026-06-01" not in summary
+
+
 def test_get_or_create_user_creates_default_habits(temp_db):
     user_id = temp_db.get_or_create_user(111, "Alice")
     habits = temp_db.get_habits(user_id)

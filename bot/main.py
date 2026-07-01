@@ -1,3 +1,4 @@
+import calendar as calendar_module
 import logging
 import os
 from collections import OrderedDict
@@ -34,6 +35,19 @@ FUEL_DRAFT = "fuel_draft"
 
 HABIT_STATUS_EMOJI = {"done": "✅", "skip": "❌", None: "➖"}
 MAIN_SLOT = "main"
+
+MONTHS_RU = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
+
+
+def shift_month(year_month: str, delta: int) -> str:
+    year, month = map(int, year_month.split("-"))
+    month += delta
+    year += (month - 1) // 12
+    month = (month - 1) % 12 + 1
+    return f"{year:04d}-{month:02d}"
 
 
 async def send_or_replace(
@@ -388,6 +402,8 @@ async def fuel_payment_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("Категория не найдена. Используй /expense ещё раз.")
         return
     payment_method = query.data.split(":", 1)[1]
+    log_date = draft.get("date")
+    logged_at = f"{log_date}T12:00:00+00:00" if log_date else None
     db.add_expense(
         user_id,
         draft["category_id"],
@@ -396,11 +412,16 @@ async def fuel_payment_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE
         liters=draft["liters"],
         station=draft["station"],
         payment_method=payment_method,
+        logged_at=logged_at,
     )
     await query.answer("Записано!")
-    await query.edit_message_text(
-        f"💸 Заправка {draft['station']}: {draft['liters']} л на {draft['amount']} ₽ ({payment_method})"
-    )
+    if log_date:
+        text, markup = build_day_view(user_id, log_date)
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+    else:
+        await query.edit_message_text(
+            f"💸 Заправка {draft['station']}: {draft['liters']} л на {draft['amount']} ₽ ({payment_method})"
+        )
 
 
 async def expenses_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -437,8 +458,45 @@ def _group_by_category(rows):
     return grouped
 
 
-def build_habits_view(rows, log_date: str):
-    lines = [f"📅 *Трекер привычек* · {escape_md(log_date)}", ""]
+def build_calendar_view(user_id: int, year_month: str):
+    year, month = map(int, year_month.split("-"))
+    weeks = calendar_module.monthcalendar(year, month)
+    summary = db.get_habit_days_summary(user_id, year_month)
+    today_str = db.today()
+
+    buttons = []
+    for week in weeks:
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(" ", callback_data="noop"))
+                continue
+            date_str = f"{year:04d}-{month:02d}-{day:02d}"
+            label = str(day)
+            if summary.get(date_str):
+                label = f"{label}✅"
+            if date_str == today_str:
+                label = f"[{label}]"
+            row.append(InlineKeyboardButton(label, callback_data=f"calday:{date_str}"))
+        buttons.append(row)
+    buttons.append(
+        [
+            InlineKeyboardButton("◀️", callback_data=f"calmonth:{shift_month(year_month, -1)}"),
+            InlineKeyboardButton("▶️", callback_data=f"calmonth:{shift_month(year_month, 1)}"),
+        ]
+    )
+    buttons.append([InlineKeyboardButton("🏠 Панель", callback_data="backpanel")])
+
+    text = (
+        f"📅 *{escape_md(MONTHS_RU[month - 1])} {year}*\n"
+        "Выбери день, чтобы отметить привычки и заправки\\."
+    )
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def build_day_view(user_id: int, log_date: str):
+    rows = db.get_habit_logs_for_date(user_id, log_date)
+    lines = [f"📅 *{escape_md(log_date)}*", ""]
     buttons = []
     for category, items in _group_by_category(rows).items():
         lines.append(f"— *{escape_md(category)}* —")
@@ -446,18 +504,64 @@ def build_habits_view(rows, log_date: str):
             emoji = HABIT_STATUS_EMOJI[h["status"]]
             lines.append(f"{emoji} {escape_md(h['title'])}")
             buttons.append(
-                [InlineKeyboardButton(f"{emoji} {h['title'][:24]}", callback_data=f"habittgl:{h['id']}")]
+                [
+                    InlineKeyboardButton(
+                        f"{emoji} {h['title'][:24]}", callback_data=f"habittgl:{log_date}:{h['id']}"
+                    )
+                ]
             )
         lines.append("")
-    buttons.append([InlineKeyboardButton("◀️ К панели", callback_data="backpanel")])
+
+    fuel_entries = [e for e in db.get_expenses_for_date(user_id, log_date) if e["station"]]
+    if fuel_entries:
+        lines.append("— *⛽️ Заправки* —")
+        for e in fuel_entries:
+            lines.append(
+                f"{escape_md(e['station'])}: {escape_md(e['liters'])} л, "
+                f"{escape_md(e['amount'])} ₽, {escape_md(e['payment_method'])}"
+            )
+        lines.append("")
+
+    buttons.append([InlineKeyboardButton("⛽️ Добавить заправку", callback_data=f"calfuelstart:{log_date}")])
+    buttons.append([InlineKeyboardButton("◀️ К календарю", callback_data=f"calmonth:{log_date[:7]}")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    text, markup = build_calendar_view(user_id, db.today()[:7])
+    await send_or_replace(update, context, MAIN_SLOT, text, reply_markup=markup)
+
+
+async def calendar_month_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    year_month = query.data.split(":", 1)[1]
+    text, markup = build_calendar_view(user_id, year_month)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+
+
+async def calendar_day_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    log_date = query.data.split(":", 1)[1]
+    text, markup = build_day_view(user_id, log_date)
+    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+
+
+async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
 
 
 async def habits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
-    rows = db.get_habit_logs_for_date(user_id, db.today())
-    text, markup = build_habits_view(rows, db.today())
+    text, markup = build_day_view(user_id, db.today())
     await send_or_replace(update, context, MAIN_SLOT, text, reply_markup=markup)
 
 
@@ -465,16 +569,29 @@ async def habit_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
-    habit_id = int(query.data.split(":")[1])
-    today = db.today()
+    _, log_date, habit_id_str = query.data.split(":")
+    habit_id = int(habit_id_str)
     if db.get_habit(user_id, habit_id) is None:
         await query.answer("Привычка не найдена")
         return
-    new_status = db.toggle_habit_log(habit_id, today)
-    rows = db.get_habit_logs_for_date(user_id, today)
-    text, markup = build_habits_view(rows, today)
+    new_status = db.toggle_habit_log(habit_id, log_date)
+    text, markup = build_day_view(user_id, log_date)
     await query.answer(HABIT_STATUS_EMOJI[None if new_status == "none" else new_status])
     await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+
+
+async def cal_fuel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    log_date = query.data.split(":", 1)[1]
+    car_category = next((c for c in db.get_categories(user_id) if c["slug"] == "car"), None)
+    if car_category is None:
+        await query.edit_message_text("Категория «Машина» не найдена.")
+        return
+    context.user_data[FUEL_DRAFT] = {"category_id": car_category["id"], "date": log_date}
+    await query.edit_message_text("⛽️ Выбери заправку:", reply_markup=fuel_station_keyboard())
 
 
 async def habitstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -610,6 +727,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("tips", tips_cmd))
     app.add_handler(CommandHandler("habits", habits_cmd))
     app.add_handler(CommandHandler("habitstats", habitstats_cmd))
+    app.add_handler(CommandHandler("calendar", calendar_cmd))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("help", help_cmd))
 
@@ -624,6 +742,10 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(quick_expense, pattern=r"^quickexp$"))
     app.add_handler(CallbackQueryHandler(back_to_panel, pattern=r"^backpanel$"))
     app.add_handler(CallbackQueryHandler(habit_toggle, pattern=r"^habittgl:"))
+    app.add_handler(CallbackQueryHandler(calendar_month_nav, pattern=r"^calmonth:"))
+    app.add_handler(CallbackQueryHandler(calendar_day_view, pattern=r"^calday:"))
+    app.add_handler(CallbackQueryHandler(cal_fuel_start, pattern=r"^calfuelstart:"))
+    app.add_handler(CallbackQueryHandler(noop, pattern=r"^noop$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_text))
     app.add_error_handler(error_handler)

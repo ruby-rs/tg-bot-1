@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 
 from . import db
-from .formatting import escape_md, progress_bar, sparkline, table
+from .formatting import escape_md, sparkline, table
 from .tips import NUTRITION_TIPS, WELCOME_TEXT
 
 logging.basicConfig(
@@ -26,15 +26,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+MD = ParseMode.MARKDOWN_V2
+
+# Two persistent message "slots" per chat:
+#  - PANEL_SLOT: the always-visible dashboard; only ever edited in place.
+#  - AUX_SLOT: a transient message used for data-entry flows and secondary
+#    views; deleted once the flow finishes.
+PANEL_SLOT = "panel"
+AUX_SLOT = "aux"
+
+# Awaiting-input flags stored in user_data during multi-step flows.
 AWAITING_TASK = "awaiting_task_category"
 AWAITING_EXPENSE = "awaiting_expense_category"
+AWAITING_WEIGHT = "awaiting_weight"
 AWAITING_FUEL_STATION = "awaiting_fuel_station"
 AWAITING_FUEL_LITERS = "awaiting_fuel_liters"
 AWAITING_FUEL_AMOUNT = "awaiting_fuel_amount"
 FUEL_DRAFT = "fuel_draft"
+INPUT_FLAGS = (
+    AWAITING_TASK,
+    AWAITING_EXPENSE,
+    AWAITING_WEIGHT,
+    AWAITING_FUEL_STATION,
+    AWAITING_FUEL_LITERS,
+    AWAITING_FUEL_AMOUNT,
+)
 
 HABIT_STATUS_EMOJI = {"done": "✅", "skip": "❌", None: "➖"}
-MAIN_SLOT = "main"
 
 MONTHS_RU = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -50,27 +68,43 @@ def shift_month(year_month: str, delta: int) -> str:
     return f"{year:04d}-{month:02d}"
 
 
-async def send_or_replace(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    slot: str,
-    text: str,
-    reply_markup: InlineKeyboardMarkup = None,
-    parse_mode=ParseMode.MARKDOWN_V2,
-):
-    """Edits the previous bot message for this slot instead of sending a new one,
-    so the chat doesn't accumulate a message per command call."""
+# ---------------------------------------------------------------------------
+# Message plumbing
+# ---------------------------------------------------------------------------
+
+async def show_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Renders / refreshes the persistent panel message in place."""
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    text, markup = build_panel_view(user_id, user.first_name)
     chat_id = update.effective_chat.id
-    key = f"msg:{slot}"
+    key = f"msg:{PANEL_SLOT}"
     message_id = context.chat_data.get(key)
     if message_id:
         try:
             await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup,
+                chat_id=chat_id, message_id=message_id, text=text,
+                parse_mode=MD, reply_markup=markup,
+            )
+            return
+        except BadRequest:
+            pass
+    msg = await context.bot.send_message(
+        chat_id=chat_id, text=text, parse_mode=MD, reply_markup=markup
+    )
+    context.chat_data[key] = msg.message_id
+
+
+async def show_aux(update, context, text, reply_markup=None, parse_mode=MD):
+    """Shows the transient auxiliary message (reusing it if one is open)."""
+    chat_id = update.effective_chat.id
+    key = f"msg:{AUX_SLOT}"
+    message_id = context.chat_data.get(key)
+    if message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text,
+                parse_mode=parse_mode, reply_markup=reply_markup,
             )
             return
         except BadRequest:
@@ -81,224 +115,157 @@ async def send_or_replace(
     context.chat_data[key] = msg.message_id
 
 
-def category_keyboard(user_id: int, prefix: str, with_back: bool = True) -> InlineKeyboardMarkup:
-    cats = db.get_categories(user_id)
-    buttons = [
-        [InlineKeyboardButton(f"{c['emoji']} {c['title']}", callback_data=f"{prefix}:{c['id']}")]
-        for c in cats
-    ]
-    if with_back:
-        buttons.append([InlineKeyboardButton("◀️ К панели", callback_data="backpanel")])
-    return InlineKeyboardMarkup(buttons)
+async def clear_aux(update, context):
+    """Deletes the transient auxiliary message if one is open."""
+    chat_id = update.effective_chat.id
+    key = f"msg:{AUX_SLOT}"
+    message_id = context.chat_data.pop(key, None)
+    if message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except BadRequest:
+            pass
+
+
+async def edit_aux(query, text, reply_markup=None, parse_mode=MD):
+    """Edits the aux message the given callback button lives on."""
+    try:
+        await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except BadRequest:
+        pass
+
+
+async def delete_user_message(update):
+    """Removes the user's own input message to keep the chat tidy (private chats allow this)."""
+    try:
+        await update.message.delete()
+    except BadRequest:
+        pass
+
+
+def clear_flags(context):
+    for flag in INPUT_FLAGS:
+        context.user_data.pop(flag, None)
+    context.user_data.pop(FUEL_DRAFT, None)
+
+
+# ---------------------------------------------------------------------------
+# Panel (persistent dashboard of today's checkers)
+# ---------------------------------------------------------------------------
+
+def build_panel_view(user_id: int, first_name: str):
+    today = db.today()
+    rows = db.get_habit_logs_for_date(user_id, today)
+    done = sum(1 for r in rows if r["status"] == "done")
+    total = len(rows)
+
+    date_h = escape_md(datetime.now().strftime("%d.%m.%Y"))
+    lines = [f"📊 *{escape_md(first_name)}* · {date_h}", ""]
+    lines.append(f"Отмечено сегодня: *{done}/{total}*")
+
+    weights = db.get_weights(user_id, limit=7)
+    if weights:
+        ordered = [w["weight"] for w in reversed(weights)]
+        wline = f"⚖️ *{escape_md(ordered[-1])} кг* `{sparkline(ordered)}`"
+        if len(ordered) >= 2:
+            diff = round(ordered[-1] - ordered[-2], 1)
+            sign = "+" if diff >= 0 else ""
+            wline += f" \\({escape_md(sign + str(diff))}\\)"
+        lines.append(wline)
+
+    expenses = db.expense_totals_this_month(user_id)
+    if expenses:
+        total_exp = sum(e["total"] for e in expenses)
+        lines.append(f"💸 Расходы за месяц: *{escape_md(f'{total_exp:.0f}')} ₽*")
+
+    lines.append("")
+    lines.append("_Нажимай, чтобы отметить за сегодня \\(✅ сделал · ❌ пропустил · ➖ нет\\):_")
+
+    buttons = []
+    row_buf = []
+    for r in rows:
+        emoji = HABIT_STATUS_EMOJI[r["status"]]
+        row_buf.append(
+            InlineKeyboardButton(f"{emoji} {r['title'][:16]}", callback_data=f"ptgl:{r['id']}")
+        )
+        if len(row_buf) == 2:
+            buttons.append(row_buf)
+            row_buf = []
+    if row_buf:
+        buttons.append(row_buf)
+
+    buttons.append(
+        [
+            InlineKeyboardButton("💸 Расход", callback_data="quickexp"),
+            InlineKeyboardButton("⚖️ Вес", callback_data="logweight"),
+        ]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton("📅 Календарь", callback_data="quicknav:calendar"),
+            InlineKeyboardButton("📊 Статистика", callback_data="quicknav:habitstats"),
+        ]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton("📋 Задачи", callback_data="quicknav:tasks"),
+            InlineKeyboardButton("🍗 Советы", callback_data="quicknav:tips"),
+        ]
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.get_or_create_user(user.id, user.full_name)
-    await update.message.reply_text(WELCOME_TEXT, parse_mode=ParseMode.MARKDOWN_V2)
-
-
-def build_panel_view(user_id: int, first_name: str):
-    stats = db.category_stats(user_id)
-
-    today = escape_md(datetime.now().strftime("%d.%m.%Y"))
-    lines = [f"📊 *Панель прогресса* · {escape_md(first_name)}", f"_{today}_", ""]
-
-    rows = []
-    total_done = total_all = 0
-    for row in stats:
-        done = row["done"] or 0
-        total = row["total"] or 0
-        total_done += done
-        total_all += total
-        label = f"{row['emoji']} {row['title']}"
-        rows.append((label, progress_bar(done, total, length=8), f"{done}/{total}"))
-
-    lines.append(f">Всего задач выполнено: *{total_done}/{total_all}*")
-    lines.append("```")
-    lines.append(table(rows))
-    lines.append("```")
-
-    weights = db.get_weights(user_id, limit=7)
-    if weights:
-        ordered = [w["weight"] for w in reversed(weights)]
-        latest = ordered[-1]
-        line = f"⚖️ Вес: *{escape_md(latest)} кг* `{sparkline(ordered)}`"
-        if len(ordered) >= 2:
-            diff = round(ordered[-1] - ordered[-2], 1)
-            sign = "+" if diff >= 0 else ""
-            line += f"  \\({escape_md(sign + str(diff))}\\)"
-        lines.append("")
-        lines.append(line)
-
-    expenses = db.expense_totals_this_month(user_id)
-    if expenses:
-        exp_rows = [(f"{e['emoji']} {e['title']}", f"{e['total']:.0f}") for e in expenses]
-        exp_total = sum(e["total"] for e in expenses)
-        exp_rows.append(("Итого", f"{exp_total:.0f}"))
-        lines.append("")
-        lines.append("💸 *Расходы в этом месяце*")
-        lines.append("```")
-        lines.append(table(exp_rows))
-        lines.append("```")
-
-    buttons = [
-        [
-            InlineKeyboardButton("➕ Задача", callback_data="quickadd"),
-            InlineKeyboardButton("💸 Расход", callback_data="quickexp"),
-        ],
-        [
-            InlineKeyboardButton("📋 Категории", callback_data="quicknav:cats"),
-            InlineKeyboardButton("📅 Календарь", callback_data="quicknav:calendar"),
-        ],
-        [
-            InlineKeyboardButton("✅ Привычки", callback_data="quicknav:habits"),
-            InlineKeyboardButton("📊 Расходы", callback_data="quicknav:expenses"),
-        ],
-        [
-            InlineKeyboardButton("⚖️ Вес", callback_data="quicknav:weightstats"),
-            InlineKeyboardButton("🍗 Советы", callback_data="quicknav:tips"),
-        ],
-    ]
-    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+    await update.message.reply_text(WELCOME_TEXT, parse_mode=MD)
+    await show_panel(update, context)
 
 
 async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    text, markup = build_panel_view(user_id, user.first_name)
-    await send_or_replace(update, context, MAIN_SLOT, text, reply_markup=markup)
+    await show_panel(update, context)
 
 
-async def quick_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def panel_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles today's checker straight from the panel and refreshes it in place."""
     query = update.callback_query
-    await query.answer()
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
-    await query.edit_message_text(
-        "Выбери категорию для новой задачи:", reply_markup=category_keyboard(user_id, "addcat")
-    )
-
-
-async def quick_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    await query.edit_message_text(
-        "Выбери категорию расхода:", reply_markup=category_keyboard(user_id, "expcat")
-    )
-
-
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    await send_or_replace(
-        update,
-        context,
-        MAIN_SLOT,
-        "Выбери категорию для новой задачи:",
-        reply_markup=category_keyboard(user_id, "addcat"),
-        parse_mode=None,
-    )
-
-
-async def add_category_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    category_id = int(query.data.split(":")[1])
-    context.user_data[AWAITING_TASK] = category_id
-    await query.edit_message_text("Напиши текст задачи следующим сообщением.")
-
-
-async def tasks_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    await send_or_replace(
-        update,
-        context,
-        MAIN_SLOT,
-        "Выбери категорию для просмотра задач:",
-        reply_markup=category_keyboard(user_id, "viewcat"),
-        parse_mode=None,
-    )
-
-
-async def tasks_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    category_id = int(query.data.split(":")[1])
-    category = db.get_category(user_id, category_id)
-    if category is None:
-        await query.edit_message_text("Категория не найдена.")
+    habit_id = int(query.data.split(":")[1])
+    if db.get_habit(user_id, habit_id) is None:
+        await query.answer("Пункт не найден")
         return
-    tasks = db.get_tasks(user_id, category_id=category_id)
-
-    if not tasks:
-        await query.edit_message_text(f"{category['emoji']} {category['title']}: задач пока нет.")
-        return
-
-    done_count = sum(1 for t in tasks if t["status"] == "done")
-    text_lines = [
-        f"{category['emoji']} *{escape_md(category['title'])}*",
-        f"`{escape_md(progress_bar(done_count, len(tasks), length=12))}`  \\({done_count}/{len(tasks)}\\)",
-        "",
-    ]
-    buttons = []
-    for t in tasks:
-        mark = "✅" if t["status"] == "done" else "⬜️"
-        text_lines.append(f"{mark} {escape_md(t['title'])}")
-        if t["status"] != "done":
-            buttons.append(
-                [
-                    InlineKeyboardButton(f"✅ {t['title'][:20]}", callback_data=f"done:{t['id']}"),
-                    InlineKeyboardButton("🗑", callback_data=f"del:{t['id']}"),
-                ]
-            )
-    buttons.append([InlineKeyboardButton("◀️ К панели", callback_data="backpanel")])
-    await query.edit_message_text(
-        "\n".join(text_lines),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-async def back_to_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
+    new_status = db.toggle_habit_log(habit_id, db.today())
+    await query.answer(HABIT_STATUS_EMOJI[None if new_status == "none" else new_status])
     text, markup = build_panel_view(user_id, user.first_name)
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+    await edit_aux(query, text, reply_markup=markup)  # button lives on the panel message
 
 
-async def task_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    task_id = int(query.data.split(":")[1])
-    db.complete_task(user_id, task_id)
-    await query.answer("Готово! 🎉")
-    await query.edit_message_reply_markup(reply_markup=None)
+# ---------------------------------------------------------------------------
+# Weight entry (transient aux flow)
+# ---------------------------------------------------------------------------
 
-
-async def task_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    task_id = int(query.data.split(":")[1])
-    db.delete_task(user_id, task_id)
-    await query.answer("Удалено")
-    await query.edit_message_reply_markup(reply_markup=None)
+async def log_weight_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    clear_flags(context)
+    context.user_data[AWAITING_WEIGHT] = True
+    await show_aux(
+        update, context,
+        "⚖️ Напиши вес в кг, например: 61.5",
+        reply_markup=cancel_keyboard(), parse_mode=None,
+    )
 
 
 async def weight_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
     if not context.args:
-        await update.message.reply_text("Использование: /weight 61.5")
+        clear_flags(context)
+        context.user_data[AWAITING_WEIGHT] = True
+        await show_aux(
+            update, context, "⚖️ Напиши вес в кг, например: 61.5",
+            reply_markup=cancel_keyboard(), parse_mode=None,
+        )
         return
     try:
         value = float(context.args[0].replace(",", "."))
@@ -309,42 +276,26 @@ async def weight_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Вес должен быть в диапазоне 20-300 кг.")
         return
     db.log_weight(user_id, value)
-    await update.message.reply_text(f"⚖️ Записал вес: {value} кг")
+    await delete_user_message(update)
+    await show_panel(update, context)
 
 
-async def weight_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    weights = db.get_weights(user_id, limit=10)
-    if not weights:
-        await send_or_replace(
-            update, context, MAIN_SLOT, "Пока нет записей веса. Используй /weight 61.5", parse_mode=None
-        )
-        return
-    ordered = list(reversed(weights))
-    values = [w["weight"] for w in ordered]
-    lines = ["⚖️ *Динамика веса*", ""]
-    lines.append(f"`{sparkline(values)}`")
-    lines.append("```")
-    lines.append(table([(w["logged_at"][:10], f"{w['weight']} кг") for w in ordered]))
-    lines.append("```")
-    change = round(values[-1] - values[0], 1)
-    sign = "+" if change >= 0 else ""
-    lines.append(f"Изменение за период: *{escape_md(sign + str(change))} кг*")
-    await send_or_replace(update, context, MAIN_SLOT, "\n".join(lines))
+# ---------------------------------------------------------------------------
+# Expense entry (transient aux flow)
+# ---------------------------------------------------------------------------
+
+def category_keyboard(user_id: int, prefix: str) -> InlineKeyboardMarkup:
+    cats = db.get_categories(user_id)
+    buttons = [
+        [InlineKeyboardButton(f"{c['emoji']} {c['title']}", callback_data=f"{prefix}:{c['id']}")]
+        for c in cats
+    ]
+    buttons.append([InlineKeyboardButton("✖️ Закрыть", callback_data="auxclose")])
+    return InlineKeyboardMarkup(buttons)
 
 
-async def expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    await send_or_replace(
-        update,
-        context,
-        MAIN_SLOT,
-        "Выбери категорию расхода:",
-        reply_markup=category_keyboard(user_id, "expcat"),
-        parse_mode=None,
-    )
+def cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Отмена", callback_data="auxclose")]])
 
 
 def fuel_station_keyboard() -> InlineKeyboardMarkup:
@@ -352,12 +303,26 @@ def fuel_station_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(name, callback_data=f"fuelstation:{name}")] for name in db.FUEL_STATIONS
     ]
     buttons.append([InlineKeyboardButton("✏️ Другая заправка", callback_data="fuelstation:custom")])
+    buttons.append([InlineKeyboardButton("✖️ Отмена", callback_data="auxclose")])
     return InlineKeyboardMarkup(buttons)
 
 
 def payment_method_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(name, callback_data=f"fuelpay:{name}") for name in db.PAYMENT_METHODS]]
+    )
+
+
+async def expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Opens the expense category chooser in the aux message."""
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    clear_flags(context)
+    if update.callback_query:
+        await update.callback_query.answer()
+    await show_aux(
+        update, context, "💸 Выбери категорию расхода:",
+        reply_markup=category_keyboard(user_id, "expcat"), parse_mode=None,
     )
 
 
@@ -369,32 +334,33 @@ async def expense_category_chosen(update: Update, context: ContextTypes.DEFAULT_
     category_id = int(query.data.split(":")[1])
     category = db.get_category(user_id, category_id)
     if category is None:
-        await query.edit_message_text("Категория не найдена. Используй /expense ещё раз.")
+        await edit_aux(query, "Категория не найдена.", reply_markup=cancel_keyboard(), parse_mode=None)
         return
-
     if category["slug"] == "car":
         context.user_data[FUEL_DRAFT] = {"category_id": category_id}
-        await query.edit_message_text("⛽️ Выбери заправку:", reply_markup=fuel_station_keyboard())
+        await edit_aux(query, "⛽️ Выбери заправку:", reply_markup=fuel_station_keyboard(), parse_mode=None)
         return
-
     context.user_data[AWAITING_EXPENSE] = category_id
-    await query.edit_message_text("Напиши сумму и комментарий, например: 1500 бензин")
+    await edit_aux(
+        query, f"💸 {category['emoji']} {category['title']}\nНапиши сумму и комментарий, например: 1500 продукты",
+        reply_markup=cancel_keyboard(), parse_mode=None,
+    )
 
 
 async def fuel_station_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if FUEL_DRAFT not in context.user_data:
-        await query.edit_message_text("Сессия истекла. Используй /expense ещё раз.")
+        await edit_aux(query, "Сессия истекла.", reply_markup=cancel_keyboard(), parse_mode=None)
         return
     station = query.data.split(":", 1)[1]
     if station == "custom":
         context.user_data[AWAITING_FUEL_STATION] = True
-        await query.edit_message_text("Напиши название заправки:")
+        await edit_aux(query, "Напиши название заправки:", reply_markup=cancel_keyboard(), parse_mode=None)
         return
     context.user_data[FUEL_DRAFT]["station"] = station
     context.user_data[AWAITING_FUEL_LITERS] = True
-    await query.edit_message_text(f"⛽️ {station}\nСколько литров залил?")
+    await edit_aux(query, f"⛽️ {station}\nСколько литров залил?", reply_markup=cancel_keyboard(), parse_mode=None)
 
 
 async def fuel_payment_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -404,62 +370,133 @@ async def fuel_payment_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE
     draft = context.user_data.pop(FUEL_DRAFT, None)
     if not draft or "amount" not in draft:
         await query.answer("Сессия истекла")
-        await query.edit_message_text("Сессия истекла. Используй /expense ещё раз.")
+        await clear_aux(update, context)
+        await show_panel(update, context)
         return
     category = db.get_category(user_id, draft["category_id"])
     if category is None:
         await query.answer("Категория не найдена")
-        await query.edit_message_text("Категория не найдена. Используй /expense ещё раз.")
+        await clear_aux(update, context)
+        await show_panel(update, context)
         return
     payment_method = query.data.split(":", 1)[1]
     log_date = draft.get("date")
     logged_at = f"{log_date}T12:00:00+00:00" if log_date else None
     db.add_expense(
-        user_id,
-        draft["category_id"],
-        draft["amount"],
+        user_id, draft["category_id"], draft["amount"],
         note=f"{draft['station']}, {draft['liters']} л",
-        liters=draft["liters"],
-        station=draft["station"],
-        payment_method=payment_method,
-        logged_at=logged_at,
+        liters=draft["liters"], station=draft["station"],
+        payment_method=payment_method, logged_at=logged_at,
     )
     await query.answer("Записано!")
+    clear_flags(context)
     if log_date:
         text, markup = build_day_view(user_id, log_date)
-        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+        await edit_aux(query, text, reply_markup=markup)
     else:
-        await query.edit_message_text(
-            f"💸 Заправка {draft['station']}: {draft['liters']} л на {draft['amount']} ₽ ({payment_method})"
-        )
+        await clear_aux(update, context)
+    await show_panel(update, context)
 
 
-async def expenses_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------------------------------------------------------------------------
+# Tasks (secondary: free-text to-dos behind a button)
+# ---------------------------------------------------------------------------
+
+def build_task_list(user_id: int, category):
+    tasks = db.get_tasks(user_id, category_id=category["id"])
+    lines = [f"{category['emoji']} *{escape_md(category['title'])}*", ""]
+    if not tasks:
+        lines.append("_Задач пока нет._")
+    buttons = []
+    for t in tasks:
+        mark = "✅" if t["status"] == "done" else "⬜️"
+        lines.append(f"{mark} {escape_md(t['title'])}")
+        if t["status"] != "done":
+            buttons.append(
+                [
+                    InlineKeyboardButton(f"✅ {t['title'][:18]}", callback_data=f"done:{t['id']}"),
+                    InlineKeyboardButton("🗑", callback_data=f"del:{t['id']}"),
+                ]
+            )
+    buttons.append(
+        [InlineKeyboardButton("➕ Добавить задачу", callback_data=f"taskadd:{category['id']}")]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton("◀️ Категории", callback_data="taskmenu"),
+            InlineKeyboardButton("✖️ Закрыть", callback_data="auxclose"),
+        ]
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def tasks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Opens the task category chooser in the aux message."""
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
-    totals = db.expense_totals_this_month(user_id)
-    if not totals:
-        await send_or_replace(
-            update,
-            context,
-            MAIN_SLOT,
-            "В этом месяце расходов ещё не записано. Используй /expense",
-            parse_mode=None,
-        )
+    clear_flags(context)
+    if update.callback_query:
+        await update.callback_query.answer()
+    await show_aux(
+        update, context, "📋 Выбери категорию задач:",
+        reply_markup=category_keyboard(user_id, "viewcat"), parse_mode=None,
+    )
+
+
+async def tasks_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    category_id = int(query.data.split(":")[1])
+    category = db.get_category(user_id, category_id)
+    if category is None:
+        await edit_aux(query, "Категория не найдена.", reply_markup=cancel_keyboard(), parse_mode=None)
         return
-    rows = [(f"{e['emoji']} {e['title']}", f"{e['total']:.0f}") for e in totals]
-    rows.append(("Итого", f"{sum(e['total'] for e in totals):.0f}"))
-    lines = ["💸 *Расходы за месяц*", "```", table(rows), "```"]
-    await send_or_replace(update, context, MAIN_SLOT, "\n".join(lines))
+    text, markup = build_task_list(user_id, category)
+    await edit_aux(query, text, reply_markup=markup)
 
 
-async def tips_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_or_replace(update, context, MAIN_SLOT, NUTRITION_TIPS)
+async def task_add_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category_id = int(query.data.split(":")[1])
+    context.user_data[AWAITING_TASK] = category_id
+    await edit_aux(query, "✍️ Напиши текст задачи следующим сообщением.",
+                   reply_markup=cancel_keyboard(), parse_mode=None)
 
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_or_replace(update, context, MAIN_SLOT, WELCOME_TEXT)
+async def task_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Готово! 🎉")
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    task_id = int(query.data.split(":")[1])
+    task = db.get_task(user_id, task_id)
+    db.complete_task(user_id, task_id)
+    if task:
+        category = db.get_category(user_id, task["category_id"])
+        text, markup = build_task_list(user_id, category)
+        await edit_aux(query, text, reply_markup=markup)
 
+
+async def task_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("Удалено")
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    task_id = int(query.data.split(":")[1])
+    task = db.get_task(user_id, task_id)
+    category = db.get_category(user_id, task["category_id"]) if task else None
+    db.delete_task(user_id, task_id)
+    if category:
+        text, markup = build_task_list(user_id, category)
+        await edit_aux(query, text, reply_markup=markup)
+
+
+# ---------------------------------------------------------------------------
+# Calendar (secondary view in aux)
+# ---------------------------------------------------------------------------
 
 def _group_by_category(rows):
     grouped = OrderedDict()
@@ -495,11 +532,11 @@ def build_calendar_view(user_id: int, year_month: str):
             InlineKeyboardButton("▶️", callback_data=f"calmonth:{shift_month(year_month, 1)}"),
         ]
     )
-    buttons.append([InlineKeyboardButton("🏠 Панель", callback_data="backpanel")])
+    buttons.append([InlineKeyboardButton("✖️ Закрыть", callback_data="auxclose")])
 
     text = (
         f"📅 *{escape_md(MONTHS_RU[month - 1])} {year}*\n"
-        "Выбери день, чтобы отметить привычки и заправки\\."
+        "Выбери день, чтобы отметить пункты и заправки\\."
     )
     return text, InlineKeyboardMarkup(buttons)
 
@@ -533,15 +570,22 @@ def build_day_view(user_id: int, log_date: str):
         lines.append("")
 
     buttons.append([InlineKeyboardButton("⛽️ Добавить заправку", callback_data=f"calfuelstart:{log_date}")])
-    buttons.append([InlineKeyboardButton("◀️ К календарю", callback_data=f"calmonth:{log_date[:7]}")])
+    buttons.append(
+        [
+            InlineKeyboardButton("◀️ Календарь", callback_data=f"calmonth:{log_date[:7]}"),
+            InlineKeyboardButton("✖️ Закрыть", callback_data="auxclose"),
+        ]
+    )
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 async def calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
+    if update.callback_query:
+        await update.callback_query.answer()
     text, markup = build_calendar_view(user_id, db.today()[:7])
-    await send_or_replace(update, context, MAIN_SLOT, text, reply_markup=markup)
+    await show_aux(update, context, text, reply_markup=markup)
 
 
 async def calendar_month_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -551,7 +595,7 @@ async def calendar_month_nav(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = db.get_or_create_user(user.id, user.full_name)
     year_month = query.data.split(":", 1)[1]
     text, markup = build_calendar_view(user_id, year_month)
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+    await edit_aux(query, text, reply_markup=markup)
 
 
 async def calendar_day_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -561,33 +605,25 @@ async def calendar_day_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = db.get_or_create_user(user.id, user.full_name)
     log_date = query.data.split(":", 1)[1]
     text, markup = build_day_view(user_id, log_date)
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
-
-
-async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-
-
-async def habits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = db.get_or_create_user(user.id, user.full_name)
-    text, markup = build_day_view(user_id, db.today())
-    await send_or_replace(update, context, MAIN_SLOT, text, reply_markup=markup)
+    await edit_aux(query, text, reply_markup=markup)
 
 
 async def habit_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle a checker for a specific day from the calendar day view (aux)."""
     query = update.callback_query
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
     _, log_date, habit_id_str = query.data.split(":")
     habit_id = int(habit_id_str)
     if db.get_habit(user_id, habit_id) is None:
-        await query.answer("Привычка не найдена")
+        await query.answer("Пункт не найден")
         return
     new_status = db.toggle_habit_log(habit_id, log_date)
-    text, markup = build_day_view(user_id, log_date)
     await query.answer(HABIT_STATUS_EMOJI[None if new_status == "none" else new_status])
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=markup)
+    text, markup = build_day_view(user_id, log_date)
+    await edit_aux(query, text, reply_markup=markup)
+    if log_date == db.today():
+        await show_panel(update, context)
 
 
 async def cal_fuel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -598,44 +634,156 @@ async def cal_fuel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_date = query.data.split(":", 1)[1]
     car_category = next((c for c in db.get_categories(user_id) if c["slug"] == "car"), None)
     if car_category is None:
-        await query.edit_message_text("Категория «Машина» не найдена.")
+        await edit_aux(query, "Категория «Машина» не найдена.", reply_markup=cancel_keyboard(), parse_mode=None)
         return
     context.user_data[FUEL_DRAFT] = {"category_id": car_category["id"], "date": log_date}
-    await query.edit_message_text("⛽️ Выбери заправку:", reply_markup=fuel_station_keyboard())
+    await edit_aux(query, "⛽️ Выбери заправку:", reply_markup=fuel_station_keyboard(), parse_mode=None)
+
+
+# ---------------------------------------------------------------------------
+# Read-only secondary views (aux)
+# ---------------------------------------------------------------------------
+
+async def weight_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    if update.callback_query:
+        await update.callback_query.answer()
+    weights = db.get_weights(user_id, limit=10)
+    if not weights:
+        await show_aux(update, context, "Пока нет записей веса. Используй кнопку ⚖️ Вес.",
+                       reply_markup=cancel_keyboard(), parse_mode=None)
+        return
+    ordered = list(reversed(weights))
+    values = [w["weight"] for w in ordered]
+    lines = ["⚖️ *Динамика веса*", "", f"`{sparkline(values)}`", "```",
+             table([(w["logged_at"][:10], f"{w['weight']} кг") for w in ordered]), "```"]
+    change = round(values[-1] - values[0], 1)
+    sign = "+" if change >= 0 else ""
+    lines.append(f"Изменение за период: *{escape_md(sign + str(change))} кг*")
+    await show_aux(update, context, "\n".join(lines), reply_markup=close_keyboard())
+
+
+async def expenses_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = db.get_or_create_user(user.id, user.full_name)
+    if update.callback_query:
+        await update.callback_query.answer()
+    totals = db.expense_totals_this_month(user_id)
+    if not totals:
+        await show_aux(update, context, "В этом месяце расходов ещё не записано.",
+                       reply_markup=close_keyboard(), parse_mode=None)
+        return
+    rows = [(f"{e['emoji']} {e['title']}", f"{e['total']:.0f}") for e in totals]
+    rows.append(("Итого", f"{sum(e['total'] for e in totals):.0f}"))
+    lines = ["💸 *Расходы за месяц*", "```", table(rows), "```"]
+    await show_aux(update, context, "\n".join(lines), reply_markup=close_keyboard())
 
 
 async def habitstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
+    if update.callback_query:
+        await update.callback_query.answer()
     year_month = db.today()[:7]
     rows = db.get_habit_month_stats(user_id, year_month)
-
-    lines = [f"📊 *Статистика привычек за {escape_md(year_month)}*", ""]
+    lines = [f"📊 *Статистика за {escape_md(year_month)}*", ""]
     for category, items in _group_by_category(rows).items():
         rows_table = [(h["title"], str(h["done_count"] or 0)) for h in items]
         lines.append(f"— *{escape_md(category)}* —")
         lines.append("```")
         lines.append(table(rows_table))
         lines.append("```")
-    await send_or_replace(update, context, MAIN_SLOT, "\n".join(lines))
+    await show_aux(update, context, "\n".join(lines), reply_markup=close_keyboard())
 
+
+async def tips_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+    await show_aux(update, context, NUTRITION_TIPS, reply_markup=close_keyboard())
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(WELCOME_TEXT, parse_mode=MD)
+
+
+def close_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Закрыть", callback_data="auxclose")]])
+
+
+# ---------------------------------------------------------------------------
+# Quick navigation from panel buttons + aux close
+# ---------------------------------------------------------------------------
+
+QUICK_NAV_HANDLERS = {
+    "tasks": tasks_menu,
+    "calendar": calendar_cmd,
+    "habitstats": habitstats_cmd,
+    "expenses": expenses_report,
+    "weightstats": weight_stats,
+    "tips": tips_cmd,
+}
+
+
+async def quick_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    action = update.callback_query.data.split(":", 1)[1]
+    handler = QUICK_NAV_HANDLERS.get(action)
+    if handler is not None:
+        await handler(update, context)
+    else:
+        await update.callback_query.answer()
+
+
+async def aux_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    clear_flags(context)
+    await clear_aux(update, context)
+    await show_panel(update, context)
+
+
+async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+
+
+# ---------------------------------------------------------------------------
+# Free text (multi-step input) — always tidies up: deletes user's message,
+# clears the aux prompt, refreshes the panel.
+# ---------------------------------------------------------------------------
 
 async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
 
+    if AWAITING_WEIGHT in context.user_data:
+        try:
+            value = float(update.message.text.strip().replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("Введи число, например: 61.5")
+            return
+        if not 20 <= value <= 300:
+            await update.message.reply_text("Вес должен быть в диапазоне 20-300 кг.")
+            return
+        context.user_data.pop(AWAITING_WEIGHT)
+        db.log_weight(user_id, value)
+        await delete_user_message(update)
+        await clear_aux(update, context)
+        await show_panel(update, context)
+        return
+
     if AWAITING_TASK in context.user_data:
         category_id = context.user_data.pop(AWAITING_TASK)
         title = update.message.text.strip()
         if not title:
-            await update.message.reply_text("Текст задачи не может быть пустым. Используй /add ещё раз.")
+            await update.message.reply_text("Текст задачи не может быть пустым.")
             return
         category = db.get_category(user_id, category_id)
-        if category is None:
-            await update.message.reply_text("Категория не найдена. Используй /add ещё раз.")
-            return
-        db.add_task(user_id, category_id, title)
-        await update.message.reply_text(f"✅ Добавлено в {category['emoji']} {category['title']}: {title}")
+        if category is not None:
+            db.add_task(user_id, category_id, title)
+        await delete_user_message(update)
+        if category is not None:
+            text, markup = build_task_list(user_id, category)
+            await show_aux(update, context, text, reply_markup=markup)
         return
 
     if AWAITING_FUEL_STATION in context.user_data:
@@ -646,7 +794,9 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop(AWAITING_FUEL_STATION)
         context.user_data[FUEL_DRAFT]["station"] = station
         context.user_data[AWAITING_FUEL_LITERS] = True
-        await update.message.reply_text(f"⛽️ {station}\nСколько литров залил?")
+        await delete_user_message(update)
+        await show_aux(update, context, f"⛽️ {station}\nСколько литров залил?",
+                       reply_markup=cancel_keyboard(), parse_mode=None)
         return
 
     if AWAITING_FUEL_LITERS in context.user_data:
@@ -661,7 +811,9 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop(AWAITING_FUEL_LITERS)
         context.user_data[FUEL_DRAFT]["liters"] = liters
         context.user_data[AWAITING_FUEL_AMOUNT] = True
-        await update.message.reply_text("Сколько это стоило (₽)?")
+        await delete_user_message(update)
+        await show_aux(update, context, "Сколько это стоило (₽)?",
+                       reply_markup=cancel_keyboard(), parse_mode=None)
         return
 
     if AWAITING_FUEL_AMOUNT in context.user_data:
@@ -675,9 +827,8 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data.pop(AWAITING_FUEL_AMOUNT)
         context.user_data[FUEL_DRAFT]["amount"] = amount
-        await update.message.reply_text(
-            "Как оплатил?", reply_markup=payment_method_keyboard()
-        )
+        await delete_user_message(update)
+        await show_aux(update, context, "Как оплатил?", reply_markup=payment_method_keyboard(), parse_mode=None)
         return
 
     if AWAITING_EXPENSE in context.user_data:
@@ -686,78 +837,55 @@ async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             amount = float(parts[0].replace(",", "."))
         except (ValueError, IndexError):
-            await update.message.reply_text("Не понял сумму. Формат: 1500 бензин")
+            await update.message.reply_text("Не понял сумму. Формат: 1500 продукты")
             return
         if amount <= 0:
             await update.message.reply_text("Сумма должна быть больше нуля.")
             return
         category = db.get_category(user_id, category_id)
-        if category is None:
-            await update.message.reply_text("Категория не найдена. Используй /expense ещё раз.")
-            return
-        note = parts[1] if len(parts) > 1 else ""
-        db.add_expense(user_id, category_id, amount, note)
-        await update.message.reply_text(f"💸 Записал {amount} в {category['emoji']} {category['title']}")
+        if category is not None:
+            note = parts[1] if len(parts) > 1 else ""
+            db.add_expense(user_id, category_id, amount, note)
+        await delete_user_message(update)
+        await clear_aux(update, context)
+        await show_panel(update, context)
         return
 
-    await update.message.reply_text("Не понял. Список команд: /start")
+    await delete_user_message(update)
+    await show_panel(update, context)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop(AWAITING_TASK, None)
-    context.user_data.pop(AWAITING_EXPENSE, None)
-    context.user_data.pop(AWAITING_FUEL_STATION, None)
-    context.user_data.pop(AWAITING_FUEL_LITERS, None)
-    context.user_data.pop(AWAITING_FUEL_AMOUNT, None)
-    context.user_data.pop(FUEL_DRAFT, None)
-    await update.message.reply_text("Отменено.")
-
-
-QUICK_NAV_HANDLERS = {
-    "cats": tasks_start,
-    "calendar": calendar_cmd,
-    "habits": habits_cmd,
-    "expenses": expenses_report,
-    "weightstats": weight_stats,
-    "tips": tips_cmd,
-}
-
-
-async def quick_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    action = query.data.split(":", 1)[1]
-    handler = QUICK_NAV_HANDLERS.get(action)
-    if handler is not None:
-        await handler(update, context)
-
-
-BOT_COMMANDS = [
-    BotCommand("start", "Начать / зарегистрироваться"),
-    BotCommand("panel", "Панель прогресса"),
-    BotCommand("calendar", "Календарь: привычки и заправки по дням"),
-    BotCommand("add", "Добавить задачу"),
-    BotCommand("tasks", "Список задач по категории"),
-    BotCommand("habits", "Отметить привычки за сегодня"),
-    BotCommand("habitstats", "Статистика привычек за месяц"),
-    BotCommand("weight", "Записать вес"),
-    BotCommand("weightstats", "Динамика веса"),
-    BotCommand("expense", "Записать расход"),
-    BotCommand("expenses", "Расходы за месяц"),
-    BotCommand("tips", "Советы по питанию и набору массы"),
-    BotCommand("cancel", "Отменить текущее действие"),
-    BotCommand("help", "Показать список команд"),
-]
-
-
-async def post_init(app: Application):
-    await app.bot.set_my_commands(BOT_COMMANDS)
+    clear_flags(context)
+    await clear_aux(update, context)
+    await delete_user_message(update)
+    await show_panel(update, context)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled exception while processing update: %s", update, exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text("Произошла ошибка. Попробуй ещё раз.")
+        try:
+            await update.effective_message.reply_text("Произошла ошибка. Попробуй ещё раз.")
+        except BadRequest:
+            pass
+
+
+BOT_COMMANDS = [
+    BotCommand("panel", "Панель: отметить пункты за сегодня"),
+    BotCommand("calendar", "Календарь по дням"),
+    BotCommand("expense", "Записать расход"),
+    BotCommand("weight", "Записать вес"),
+    BotCommand("stats", "Статистика за месяц"),
+    BotCommand("tasks", "Задачи (список дел)"),
+    BotCommand("tips", "Советы по питанию"),
+    BotCommand("cancel", "Отменить текущее действие"),
+    BotCommand("help", "Справка"),
+]
+
+
+async def post_init(app: Application):
+    await app.bot.set_my_commands(BOT_COMMANDS)
 
 
 def build_app() -> Application:
@@ -769,35 +897,38 @@ def build_app() -> Application:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("panel", panel))
-    app.add_handler(CommandHandler("add", add_start))
-    app.add_handler(CommandHandler("tasks", tasks_start))
-    app.add_handler(CommandHandler("weight", weight_cmd))
-    app.add_handler(CommandHandler("weightstats", weight_stats))
-    app.add_handler(CommandHandler("expense", expense_start))
-    app.add_handler(CommandHandler("expenses", expenses_report))
-    app.add_handler(CommandHandler("tips", tips_cmd))
-    app.add_handler(CommandHandler("habits", habits_cmd))
-    app.add_handler(CommandHandler("habitstats", habitstats_cmd))
+    app.add_handler(CommandHandler("habits", panel))
     app.add_handler(CommandHandler("calendar", calendar_cmd))
+    app.add_handler(CommandHandler("expense", expense_start))
+    app.add_handler(CommandHandler("weight", weight_cmd))
+    app.add_handler(CommandHandler("stats", habitstats_cmd))
+    app.add_handler(CommandHandler("habitstats", habitstats_cmd))
+    app.add_handler(CommandHandler("expenses", expenses_report))
+    app.add_handler(CommandHandler("weightstats", weight_stats))
+    app.add_handler(CommandHandler("tasks", tasks_menu))
+    app.add_handler(CommandHandler("add", tasks_menu))
+    app.add_handler(CommandHandler("tips", tips_cmd))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("help", help_cmd))
 
-    app.add_handler(CallbackQueryHandler(add_category_chosen, pattern=r"^addcat:"))
-    app.add_handler(CallbackQueryHandler(tasks_list, pattern=r"^viewcat:"))
-    app.add_handler(CallbackQueryHandler(task_done, pattern=r"^done:"))
-    app.add_handler(CallbackQueryHandler(task_del, pattern=r"^del:"))
+    app.add_handler(CallbackQueryHandler(panel_toggle, pattern=r"^ptgl:"))
+    app.add_handler(CallbackQueryHandler(log_weight_start, pattern=r"^logweight$"))
+    app.add_handler(CallbackQueryHandler(expense_start, pattern=r"^quickexp$"))
     app.add_handler(CallbackQueryHandler(expense_category_chosen, pattern=r"^expcat:"))
     app.add_handler(CallbackQueryHandler(fuel_station_chosen, pattern=r"^fuelstation:"))
     app.add_handler(CallbackQueryHandler(fuel_payment_chosen, pattern=r"^fuelpay:"))
-    app.add_handler(CallbackQueryHandler(quick_add, pattern=r"^quickadd$"))
-    app.add_handler(CallbackQueryHandler(quick_expense, pattern=r"^quickexp$"))
-    app.add_handler(CallbackQueryHandler(back_to_panel, pattern=r"^backpanel$"))
-    app.add_handler(CallbackQueryHandler(habit_toggle, pattern=r"^habittgl:"))
+    app.add_handler(CallbackQueryHandler(tasks_menu, pattern=r"^taskmenu$"))
+    app.add_handler(CallbackQueryHandler(tasks_view, pattern=r"^viewcat:"))
+    app.add_handler(CallbackQueryHandler(task_add_prompt, pattern=r"^taskadd:"))
+    app.add_handler(CallbackQueryHandler(task_done, pattern=r"^done:"))
+    app.add_handler(CallbackQueryHandler(task_del, pattern=r"^del:"))
     app.add_handler(CallbackQueryHandler(calendar_month_nav, pattern=r"^calmonth:"))
     app.add_handler(CallbackQueryHandler(calendar_day_view, pattern=r"^calday:"))
+    app.add_handler(CallbackQueryHandler(habit_toggle, pattern=r"^habittgl:"))
     app.add_handler(CallbackQueryHandler(cal_fuel_start, pattern=r"^calfuelstart:"))
-    app.add_handler(CallbackQueryHandler(noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(quick_nav, pattern=r"^quicknav:"))
+    app.add_handler(CallbackQueryHandler(aux_close, pattern=r"^auxclose$"))
+    app.add_handler(CallbackQueryHandler(noop, pattern=r"^noop$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_text))
     app.add_error_handler(error_handler)

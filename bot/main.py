@@ -7,7 +7,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -88,13 +88,17 @@ async def show_aux(update, context, text, reply_markup=None, parse_mode=MD):
 async def _upsert_slot(update, context, slot, text, reply_markup, parse_mode):
     """Edits the message stored for ``slot`` in place, or sends a new one.
 
+    The message id is persisted in the database (not in-memory chat_data),
+    so the panel/aux message is still found and reused after the bot process
+    restarts (e.g. on every deploy) — otherwise each restart would orphan the
+    old message and a fresh one would be sent, duplicating the panel.
+
     If the edit fails only because the content is identical ("message is not
     modified"), the existing message is kept — sending a fresh one there would
-    duplicate the panel/aux message in the chat.
+    also duplicate the panel/aux message in the chat.
     """
     chat_id = update.effective_chat.id
-    key = f"msg:{slot}"
-    message_id = context.chat_data.get(key)
+    message_id = db.get_slot_message(chat_id, slot)
     if message_id:
         try:
             await context.bot.edit_message_text(
@@ -108,18 +112,18 @@ async def _upsert_slot(update, context, slot, text, reply_markup, parse_mode):
     msg = await context.bot.send_message(
         chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup
     )
-    context.chat_data[key] = msg.message_id
+    db.set_slot_message(chat_id, slot, msg.message_id)
 
 
 async def clear_aux(update, context):
     """Deletes the transient auxiliary message if one is open."""
     chat_id = update.effective_chat.id
-    key = f"msg:{AUX_SLOT}"
-    message_id = context.chat_data.pop(key, None)
+    message_id = db.get_slot_message(chat_id, AUX_SLOT)
     if message_id:
+        db.clear_slot_message(chat_id, AUX_SLOT)
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except BadRequest:
+        except TelegramError:
             pass
 
 
@@ -709,19 +713,24 @@ async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Telegram has no "clear history" API, so we walk back from the /clear
     message and try to delete each preceding message id. Deletion only works
     for messages sent within the last 48 hours (Telegram limit); older ones
-    fail silently, which is fine.
+    are skipped. Any Telegram error per message (not just BadRequest — also
+    rate limits, forbidden, etc.) is swallowed so one bad id can't abort the
+    whole loop, and the panel is always re-shown afterwards even if some
+    deletions failed.
     """
     chat_id = update.effective_chat.id
     last_id = update.message.message_id
     # Forget tracked slots so a brand-new panel is created afterwards.
-    context.chat_data.pop(f"msg:{PANEL_SLOT}", None)
-    context.chat_data.pop(f"msg:{AUX_SLOT}", None)
-    for message_id in range(last_id, max(last_id - 100, 0), -1):
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except BadRequest:
-            pass
-    await show_panel(update, context)
+    db.clear_slot_message(chat_id, PANEL_SLOT)
+    db.clear_slot_message(chat_id, AUX_SLOT)
+    try:
+        for message_id in range(last_id, max(last_id - 100, 0), -1):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except TelegramError:
+                pass
+    finally:
+        await show_panel(update, context)
 
 
 def close_keyboard() -> InlineKeyboardMarkup:

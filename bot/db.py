@@ -112,6 +112,13 @@ def init_db(path: str = None):
                 UNIQUE(habit_id, log_date),
                 FOREIGN KEY(habit_id) REFERENCES habits(id)
             );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                chat_id INTEGER NOT NULL,
+                slot TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, slot)
+            );
             """
         )
         _migrate(conn)
@@ -380,6 +387,30 @@ def get_habit_days_summary(user_id: int, year_month: str):
             (user_id, year_month),
         ).fetchall()
         return {row["log_date"]: row["done_count"] for row in rows}
+
+
+def get_slot_message(chat_id: int, slot: str):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT message_id FROM chat_messages WHERE chat_id = ? AND slot = ?", (chat_id, slot)
+        ).fetchone()
+        return row["message_id"] if row else None
+
+
+def set_slot_message(chat_id: int, slot: str, message_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_messages (chat_id, slot, message_id) VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, slot) DO UPDATE SET message_id = excluded.message_id
+            """,
+            (chat_id, slot, message_id),
+        )
+
+
+def clear_slot_message(chat_id: int, slot: str):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE chat_id = ? AND slot = ?", (chat_id, slot))
 
 
 def expense_totals_this_month(user_id: int):

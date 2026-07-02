@@ -215,3 +215,28 @@ def test_get_habit_month_stats_counts_done_only(temp_db):
 
     stats = {row["id"]: row for row in temp_db.get_habit_month_stats(user_id, "2026-07")}
     assert stats[habit["id"]]["done_count"] == 1
+
+
+def test_slot_message_roundtrip_and_overwrite(temp_db):
+    assert temp_db.get_slot_message(555, "panel") is None
+
+    temp_db.set_slot_message(555, "panel", 100)
+    assert temp_db.get_slot_message(555, "panel") == 100
+
+    temp_db.set_slot_message(555, "panel", 200)
+    assert temp_db.get_slot_message(555, "panel") == 200
+
+
+def test_slot_message_survives_across_get_conn_calls(temp_db):
+    """Regression: message ids must persist independent of any in-memory state,
+    so a bot process restart doesn't orphan the tracked panel/aux message."""
+    temp_db.set_slot_message(1, "panel", 42)
+    temp_db.set_slot_message(1, "aux", 99)
+    assert temp_db.get_slot_message(1, "panel") == 42
+    assert temp_db.get_slot_message(1, "aux") == 99
+
+
+def test_clear_slot_message(temp_db):
+    temp_db.set_slot_message(1, "panel", 42)
+    temp_db.clear_slot_message(1, "panel")
+    assert temp_db.get_slot_message(1, "panel") is None

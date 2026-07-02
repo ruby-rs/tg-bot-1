@@ -707,6 +707,27 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(WELCOME_TEXT, parse_mode=MD)
 
 
+async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deletes recent messages in the chat and re-shows a fresh panel.
+
+    Telegram has no "clear history" API, so we walk back from the /clear
+    message and try to delete each preceding message id. Deletion only works
+    for messages sent within the last 48 hours (Telegram limit); older ones
+    fail silently, which is fine.
+    """
+    chat_id = update.effective_chat.id
+    last_id = update.message.message_id
+    # Forget tracked slots so a brand-new panel is created afterwards.
+    context.chat_data.pop(f"msg:{PANEL_SLOT}", None)
+    context.chat_data.pop(f"msg:{AUX_SLOT}", None)
+    for message_id in range(last_id, max(last_id - 100, 0), -1):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except BadRequest:
+            pass
+    await show_panel(update, context)
+
+
 def close_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Закрыть", callback_data="auxclose")]])
 
@@ -879,6 +900,7 @@ BOT_COMMANDS = [
     BotCommand("stats", "Статистика за месяц"),
     BotCommand("tasks", "Задачи (список дел)"),
     BotCommand("tips", "Советы по питанию"),
+    BotCommand("clear", "Очистить сообщения и обновить панель"),
     BotCommand("cancel", "Отменить текущее действие"),
     BotCommand("help", "Справка"),
 ]
@@ -908,6 +930,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("tasks", tasks_menu))
     app.add_handler(CommandHandler("add", tasks_menu))
     app.add_handler(CommandHandler("tips", tips_cmd))
+    app.add_handler(CommandHandler("clear", clear_cmd))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("help", help_cmd))
 

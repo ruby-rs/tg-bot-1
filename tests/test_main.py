@@ -8,5 +8,5 @@ def test_bot_commands_have_unique_names_and_descriptions():
 
 
 def test_quick_nav_handlers_are_callable():
-    assert set(QUICK_NAV_HANDLERS) == {"cats", "calendar", "habits", "expenses", "weightstats", "tips"}
+    assert set(QUICK_NAV_HANDLERS) == {"tasks", "calendar", "habitstats", "expenses", "weightstats", "tips"}
     assert all(callable(handler) for handler in QUICK_NAV_HANDLERS.values())

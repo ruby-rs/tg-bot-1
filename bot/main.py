@@ -77,28 +77,23 @@ async def show_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
     text, markup = build_panel_view(user_id, user.first_name)
-    chat_id = update.effective_chat.id
-    key = f"msg:{PANEL_SLOT}"
-    message_id = context.chat_data.get(key)
-    if message_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id, text=text,
-                parse_mode=MD, reply_markup=markup,
-            )
-            return
-        except BadRequest:
-            pass
-    msg = await context.bot.send_message(
-        chat_id=chat_id, text=text, parse_mode=MD, reply_markup=markup
-    )
-    context.chat_data[key] = msg.message_id
+    await _upsert_slot(update, context, PANEL_SLOT, text, markup, MD)
 
 
 async def show_aux(update, context, text, reply_markup=None, parse_mode=MD):
     """Shows the transient auxiliary message (reusing it if one is open)."""
+    await _upsert_slot(update, context, AUX_SLOT, text, reply_markup, parse_mode)
+
+
+async def _upsert_slot(update, context, slot, text, reply_markup, parse_mode):
+    """Edits the message stored for ``slot`` in place, or sends a new one.
+
+    If the edit fails only because the content is identical ("message is not
+    modified"), the existing message is kept — sending a fresh one there would
+    duplicate the panel/aux message in the chat.
+    """
     chat_id = update.effective_chat.id
-    key = f"msg:{AUX_SLOT}"
+    key = f"msg:{slot}"
     message_id = context.chat_data.get(key)
     if message_id:
         try:
@@ -107,8 +102,9 @@ async def show_aux(update, context, text, reply_markup=None, parse_mode=MD):
                 parse_mode=parse_mode, reply_markup=reply_markup,
             )
             return
-        except BadRequest:
-            pass
+        except BadRequest as exc:
+            if "not modified" in str(exc).lower():
+                return
     msg = await context.bot.send_message(
         chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup
     )

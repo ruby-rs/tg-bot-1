@@ -287,6 +287,30 @@ def add_expense(
         )
 
 
+def get_expenses_for_month(user_id: int, year_month: str):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT e.*, c.title AS category_title, c.emoji AS category_emoji
+            FROM expenses e
+            JOIN categories c ON c.id = e.category_id
+            WHERE e.user_id = ? AND strftime('%Y-%m', e.logged_at) = ?
+            ORDER BY e.logged_at DESC
+            """,
+            (user_id, year_month),
+        ).fetchall()
+
+
+def delete_expense(user_id: int, expense_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM expenses WHERE user_id = ? AND id = ?", (user_id, expense_id))
+
+
+def delete_weight(user_id: int, weight_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM weights WHERE user_id = ? AND id = ?", (user_id, weight_id))
+
+
 def get_expenses_for_date(user_id: int, log_date: str):
     with get_conn() as conn:
         return conn.execute(

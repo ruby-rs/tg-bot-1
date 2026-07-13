@@ -1,0 +1,27 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    environment:
+      DB_PATH: /data/life_tracker.db
+      WEB_PASSWORD: ${WEB_PASSWORD:?set WEB_PASSWORD in .env}
+      WEB_SECRET_KEY: ${WEB_SECRET_KEY:?set WEB_SECRET_KEY in .env}
+      WEB_USER_TG_ID: ${WEB_USER_TG_ID:-0}
+      WEB_USER_NAME: ${WEB_USER_NAME:-Веб}
+    volumes:
+      - tracker-data:/data
+
+  bot:
+    build: .
+    restart: unless-stopped
+    command: python -m bot.main
+    environment:
+      DB_PATH: /data/life_tracker.db
+      BOT_TOKEN: ${BOT_TOKEN:?set BOT_TOKEN in .env}
+    volumes:
+      - tracker-data:/data
+
+volumes:
+  tracker-data:

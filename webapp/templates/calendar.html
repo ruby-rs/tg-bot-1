@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Календарь · Трекер{% endblock %}
+{% block heading %}{{ MONTHS_RU[month - 1] }} {{ year }}{% endblock %}
+{% block content %}
+<div class="monthnav">
+    <a class="btn ghost" href="/calendar?ym={{ prev }}">‹</a>
+    <span>{{ MONTHS_RU[month - 1] }} {{ year }}</span>
+    <a class="btn ghost" href="/calendar?ym={{ next }}">›</a>
+</div>
+
+<div class="calendar">
+    <div class="cal-head">
+        {% for d in ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'] %}<span>{{ d }}</span>{% endfor %}
+    </div>
+    {% for week in weeks %}
+    <div class="cal-week">
+        {% for day in week %}
+            {% if day == 0 %}
+                <span class="cal-cell empty"></span>
+            {% else %}
+                {% set date_str = "%04d-%02d-%02d"|format(year, month, day) %}
+                <a class="cal-cell {{ 'today' if date_str == today }} {{ 'has' if summary.get(date_str) }}"
+                   href="/day/{{ date_str }}">
+                    <span class="num">{{ day }}</span>
+                    {% if summary.get(date_str) %}<span class="dot">{{ summary[date_str] }}</span>{% endif %}
+                </a>
+            {% endif %}
+        {% endfor %}
+    </div>
+    {% endfor %}
+</div>
+<p class="muted center">Цифра на дне — сколько пунктов отмечено ✅</p>
+{% endblock %}

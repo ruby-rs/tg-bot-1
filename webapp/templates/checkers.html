@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Чекеры · Трекер{% endblock %}
+{% block heading %}Чекеры{% endblock %}
+{% block header_extra %}<a class="topbar-link" href="/more">Ещё</a>{% endblock %}
+{% block content %}
+<form class="card checker-form" method="post" action="/checkers">
+    <label>Название
+        <input type="text" name="title" placeholder="напр. Заправка" required>
+    </label>
+    <label>Категория
+        <input type="text" name="category" list="cat-options" placeholder="напр. Авто" required>
+        <datalist id="cat-options">
+            {% for c in categories %}<option value="{{ c }}">{% endfor %}
+        </datalist>
+    </label>
+    <label>Тип
+        <select name="habit_type" id="type-select">
+            <option value="bool">Да/нет</option>
+            <option value="number">Число</option>
+            <option value="note">Заметка</option>
+        </select>
+    </label>
+    <div id="number-fields" class="number-fields" hidden>
+        <label>Единица <input type="text" name="unit" placeholder="г, л, ч…"></label>
+        <label>Цель <input type="number" step="any" name="target" placeholder="необязательно"></label>
+    </div>
+    <button type="submit" class="btn primary">Добавить чекер</button>
+</form>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% for category, items in groups %}
+<div class="group">
+    <div class="group-title">{{ category }}</div>
+    {% for h in items %}
+    <div class="checker-row">
+        <form class="checker-edit" method="post" action="/checkers/{{ h['id'] }}/update">
+            <input type="text" name="title" value="{{ h['title'] }}">
+            <input type="text" name="category" value="{{ h['category'] }}">
+            <span class="type-pill">{{ HABIT_TYPE_LABEL[h['type']] }}</span>
+            {% if h['type'] == 'number' %}
+            <input type="text" name="unit" value="{{ h['unit'] or '' }}" placeholder="ед.">
+            <input type="number" step="any" name="target" value="{{ h['target'] if h['target'] is not none else '' }}" placeholder="цель">
+            {% endif %}
+            <button class="btn tiny" type="submit">Сохранить</button>
+        </form>
+        <form method="post" action="/checkers/{{ h['id'] }}/delete"
+              onsubmit="return confirm('Удалить «{{ h['title'] }}» вместе со всей историей?');">
+            <button class="btn tiny danger" type="submit">Удалить</button>
+        </form>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p class="muted center">Чекеров пока нет.</p>
+{% endfor %}
+
+<script>
+(function () {
+    var sel = document.getElementById('type-select');
+    var fields = document.getElementById('number-fields');
+    function sync() { fields.hidden = sel.value !== 'number'; }
+    sel.addEventListener('change', sync);
+    sync();
+})();
+</script>
+{% endblock %}

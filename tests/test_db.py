@@ -240,3 +240,126 @@ def test_clear_slot_message(temp_db):
     temp_db.set_slot_message(1, "panel", 42)
     temp_db.clear_slot_message(1, "panel")
     assert temp_db.get_slot_message(1, "panel") is None
+
+
+def test_add_habit_creates_custom_checker(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Белок", "Здоровье", habit_type="number", unit="г", target=150)
+    habit = temp_db.get_habit(user_id, habit_id)
+    assert habit["title"] == "Белок"
+    assert habit["type"] == "number"
+    assert habit["unit"] == "г"
+    assert habit["target"] == 150.0
+
+
+def test_add_habit_generates_unique_slug_on_collision(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    id1 = temp_db.add_habit(user_id, "Тест", "Категория")
+    id2 = temp_db.add_habit(user_id, "Тест", "Категория")
+    h1 = temp_db.get_habit(user_id, id1)
+    h2 = temp_db.get_habit(user_id, id2)
+    assert h1["slug"] != h2["slug"]
+
+
+def test_update_habit_changes_fields(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Старое", "Кат1")
+    temp_db.update_habit(user_id, habit_id, title="Новое", category="Кат2")
+    habit = temp_db.get_habit(user_id, habit_id)
+    assert habit["title"] == "Новое"
+    assert habit["category"] == "Кат2"
+
+
+def test_delete_habit_removes_logs_and_entries(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Тест", "Кат", habit_type="note")
+    day = "2026-07-01"
+    temp_db.add_habit_entry(habit_id, day, "запись")
+    temp_db.delete_habit(user_id, habit_id)
+    assert temp_db.get_habit(user_id, habit_id) is None
+    assert temp_db.get_habit_entries_for_date(habit_id, day) == []
+
+
+def test_set_and_clear_habit_value(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Белок", "Кат", habit_type="number", unit="г")
+    day = "2026-07-01"
+    temp_db.set_habit_value(habit_id, day, 180.5)
+    rows = temp_db.get_habit_logs_for_date(user_id, day)
+    row = next(r for r in rows if r["id"] == habit_id)
+    assert row["value"] == 180.5
+    assert row["status"] == "done"
+
+    temp_db.clear_habit_value(habit_id, day)
+    rows = temp_db.get_habit_logs_for_date(user_id, day)
+    row = next(r for r in rows if r["id"] == habit_id)
+    assert row["value"] is None
+
+
+def test_habit_entries_multiple_per_day(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Интерактивы", "Отношения", habit_type="note")
+    day = "2026-07-01"
+    temp_db.add_habit_entry(habit_id, day, "Кино")
+    temp_db.add_habit_entry(habit_id, day, "Ужин")
+    entries = temp_db.get_habit_entries_for_date(habit_id, day)
+    assert [e["text"] for e in entries] == ["Кино", "Ужин"]
+
+
+def test_delete_habit_entry_scoped_to_user(temp_db):
+    user_a = temp_db.get_or_create_user(111, "Alice")
+    user_b = temp_db.get_or_create_user(222, "Bob")
+    habit_id = temp_db.add_habit(user_a, "Интерактивы", "Отношения", habit_type="note")
+    day = "2026-07-01"
+    entry_id = temp_db.add_habit_entry(habit_id, day, "Кино")
+
+    temp_db.delete_habit_entry(user_b, entry_id)  # not owner, no-op
+    assert len(temp_db.get_habit_entries_for_date(habit_id, day)) == 1
+
+    temp_db.delete_habit_entry(user_a, entry_id)
+    assert temp_db.get_habit_entries_for_date(habit_id, day) == []
+
+
+def test_habit_entry_counts_for_month(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Интерактивы", "Отношения", habit_type="note")
+    temp_db.add_habit_entry(habit_id, "2026-07-01", "a")
+    temp_db.add_habit_entry(habit_id, "2026-07-01", "b")
+    temp_db.add_habit_entry(habit_id, "2026-06-15", "c")
+
+    counts = temp_db.get_habit_entry_counts_for_month(user_id, "2026-07")
+    assert counts[(habit_id, "2026-07-01")] == 2
+    assert (habit_id, "2026-06-15") not in counts
+
+
+def test_habit_month_stats_includes_type_specific_totals(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    number_habit = temp_db.add_habit(user_id, "Белок", "Здоровье", habit_type="number", unit="г")
+    note_habit = temp_db.add_habit(user_id, "Интерактивы", "Отношения", habit_type="note")
+
+    temp_db.set_habit_value(number_habit, "2026-07-01", 100)
+    temp_db.set_habit_value(number_habit, "2026-07-02", 150)
+    temp_db.add_habit_entry(note_habit, "2026-07-01", "запись")
+
+    stats = {r["id"]: r for r in temp_db.get_habit_month_stats(user_id, "2026-07")}
+    assert stats[number_habit]["value_sum"] == 250
+    assert stats[note_habit]["note_count"] == 1
+
+
+def test_add_and_get_events(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    temp_db.add_event(user_id, "Вместе", "2024-01-01", recurring=False)
+    temp_db.add_event(user_id, "ДР", "1995-08-15", recurring=True, emoji="🎂")
+    events = temp_db.get_events(user_id)
+    assert len(events) == 2
+    by_title = {e["title"]: e for e in events}
+    assert by_title["Вместе"]["recurring"] == 0
+    assert by_title["ДР"]["recurring"] == 1
+    assert by_title["ДР"]["emoji"] == "🎂"
+
+
+def test_delete_event(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    event_id = temp_db.add_event(user_id, "Вместе", "2024-01-01")
+    temp_db.delete_event(user_id, event_id)
+    assert temp_db.get_events(user_id) == []

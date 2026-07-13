@@ -14,5 +14,21 @@
     </div>
 </div>
 
+{% if events %}
+<div class="events-strip">
+    {% for item in events %}
+    <div class="event-chip">
+        <span class="event-emoji">{{ item.event['emoji'] }}</span>
+        <span class="event-title">{{ item.event['title'] }}</span>
+        {% if item.display.mode == 'countup' %}
+        <span class="event-days">{{ item.display.days }} дн.</span>
+        {% else %}
+        <span class="event-days">через {{ item.display.days }} дн.</span>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 {% include "partials/checkers.html" %}
 {% endblock %}

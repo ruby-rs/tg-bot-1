@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}События · Трекер{% endblock %}
+{% block heading %}События{% endblock %}
+{% block header_extra %}<a class="topbar-link" href="/more">Ещё</a>{% endblock %}
+{% block content %}
+<form class="card event-form" method="post" action="/events">
+    <label>Название
+        <input type="text" name="title" placeholder="напр. Годовщина отношений" required>
+    </label>
+    <label>Дата
+        <input type="date" name="event_date" required>
+    </label>
+    <label>Эмодзи
+        <input type="text" name="emoji" value="🎉" maxlength="4">
+    </label>
+    <label class="checkbox-label">
+        <input type="checkbox" name="recurring" value="1">
+        Повторяется ежегодно (обратный отсчёт до следующей даты)
+    </label>
+    <p class="muted small">Без галочки — счёт вперёд от даты («вместе уже N дней»).</p>
+    <button type="submit" class="btn primary">Добавить</button>
+</form>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<div class="list">
+    {% for item in events %}
+    <div class="list-row event-row">
+        <span class="event-emoji">{{ item.event['emoji'] }}</span>
+        <div class="expense-main">
+            <span>{{ item.event['title'] }}</span>
+            <small class="muted">
+                {% if item.display.mode == 'countup' %}
+                    Вместе уже <b>{{ item.display.days }}</b> дн. (с {{ item.event['event_date'] }})
+                {% else %}
+                    До следующего раза <b>{{ item.display.days }}</b> дн. ({{ item.display.years }}-й раз)
+                {% endif %}
+            </small>
+        </div>
+        <form method="post" action="/events/{{ item.event['id'] }}/delete" class="inline">
+            <button class="btn tiny danger" type="submit">✕</button>
+        </form>
+    </div>
+    {% else %}
+    <p class="muted center">Событий пока нет.</p>
+    {% endfor %}
+</div>
+{% endblock %}

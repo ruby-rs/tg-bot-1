@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Ещё · Трекер{% endblock %}
+{% block heading %}Ещё{% endblock %}
+{% block header_extra %}<a class="topbar-link" href="/logout">Выйти</a>{% endblock %}
+{% block content %}
+<div class="more-list">
+    <a class="more-item" href="/weight"><span>⚖️</span>Вес</a>
+    <a class="more-item" href="/stats"><span>📊</span>Статистика за месяц</a>
+    <a class="more-item" href="/checkers"><span>🧩</span>Чекеры — создать/изменить/удалить</a>
+    <a class="more-item" href="/events"><span>💞</span>События и годовщины</a>
+</div>
+{% endblock %}

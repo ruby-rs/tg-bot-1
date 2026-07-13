@@ -104,6 +104,34 @@ def test_add_expense_with_fuel_details(temp_db):
     assert row["payment_method"] == "Карта"
 
 
+def test_get_known_fuel_stations_includes_custom_names(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    car_category = next(c for c in temp_db.get_categories(user_id) if c["slug"] == "car")
+    temp_db.add_expense(
+        user_id, car_category["id"], 1000.0,
+        liters=20.0, station="Моя АЗС", payment_method="Карта",
+    )
+    stations = temp_db.get_known_fuel_stations(user_id)
+    assert "Моя АЗС" in stations
+    for preset in temp_db.FUEL_STATIONS:
+        assert preset in stations
+
+
+def test_get_known_fuel_stations_recently_used_first(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    car_category = next(c for c in temp_db.get_categories(user_id) if c["slug"] == "car")
+    temp_db.add_expense(
+        user_id, car_category["id"], 1000.0, liters=20.0,
+        station="Старая АЗС", logged_at="2026-01-01T00:00:00+00:00",
+    )
+    temp_db.add_expense(
+        user_id, car_category["id"], 1000.0, liters=20.0,
+        station="Новая АЗС", logged_at="2026-06-01T00:00:00+00:00",
+    )
+    stations = temp_db.get_known_fuel_stations(user_id)
+    assert stations.index("Новая АЗС") < stations.index("Старая АЗС")
+
+
 def test_migrate_adds_missing_expense_columns(tmp_path):
     import sqlite3
 

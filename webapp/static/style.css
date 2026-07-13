@@ -146,6 +146,25 @@ html, body {
 
 .fuel-row { padding: 8px 6px; color: var(--muted); border-bottom: 1px solid var(--border); }
 
+/* Interval / expense / fuel checkers (share the note-checker layout) */
+.interval-checker, .expense-checker { flex-direction: column; align-items: stretch; cursor: default; gap: 8px; }
+.interval-add, .expense-add, .fuel-add { display: flex; flex-wrap: wrap; gap: 8px; }
+.interval-add select, .interval-add input, .expense-add input, .fuel-add select, .fuel-add input {
+    width: auto; flex: 1 1 100px; padding: 9px 10px; font-size: .9rem;
+}
+.time-row { display: flex; align-items: center; gap: 6px; flex: 1 1 160px; }
+.time-row input { flex: 1; }
+
+/* Locked (day-restricted) checker */
+.checker.locked { opacity: .55; cursor: default; }
+
+/* Day navigation (prev/today/calendar/next) on the panel */
+.daynav {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    margin-bottom: 16px;
+}
+.daynav-today { font-weight: 600; }
+
 /* Cards & forms */
 .card {
     background: var(--card);
@@ -160,9 +179,15 @@ html, body {
 .expense-form label, .fuel-fields label, .checker-form label, .event-form label {
     display: flex; flex-direction: column; gap: 6px; font-size: .85rem; color: var(--muted);
 }
-.fuel-fields, .number-fields { display: flex; flex-direction: column; gap: 12px; }
+.fuel-fields, .number-fields, .type-fields { display: flex; flex-direction: column; gap: 12px; }
 .checkbox-label { flex-direction: row !important; align-items: center; gap: 8px !important; }
 .checkbox-label input { width: auto; }
+.checker-form details.card, details.card { padding: 0; }
+details.card summary { padding: 16px; cursor: pointer; font-weight: 600; list-style: none; }
+details.card summary::-webkit-details-marker { display: none; }
+details.card[open] summary { border-bottom: 1px solid var(--border); }
+details.card form { padding: 16px; }
+.btn.small { padding: 8px 12px; font-size: .8rem; }
 
 input, select {
     width: 100%;
@@ -285,6 +310,19 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .grid-cell { color: var(--muted); }
 .grid-cell.on { color: #7fd79a; background: #17251b; }
 .grid-cell.skip { color: #ff9b9b; background: #251717; }
+
+/* Expense category breakdown */
+.cat-breakdown-row {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; margin-bottom: 8px; text-decoration: none; color: var(--fg);
+}
+.cat-breakdown-row.active { border-color: var(--accent); }
+.cat-breakdown-row .cat-emoji { font-size: 1.1rem; }
+.cat-breakdown-row .cat-title { flex: 0 0 30%; font-size: .9rem; }
+.cat-breakdown-row .bar { flex: 1; }
+.cat-breakdown-row .cat-amount { font-weight: 600; white-space: nowrap; }
+.cat-breakdown-row .cat-pct { font-size: .75rem; width: 34px; text-align: right; }
 
 /* Stats */
 .stat-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }

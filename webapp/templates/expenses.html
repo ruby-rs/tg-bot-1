@@ -2,50 +2,80 @@
 {% block title %}Расходы · Трекер{% endblock %}
 {% block heading %}Расходы{% endblock %}
 {% block content %}
-<form class="card expense-form" method="post" action="/expenses">
-    <label>Категория
-        <select name="category_id" id="cat-select">
-            {% for c in categories %}
-            <option value="{{ c['id'] }}" data-slug="{{ c['slug'] }}">{{ c['emoji'] }} {{ c['title'] }}</option>
-            {% endfor %}
-        </select>
-    </label>
-    <label>Сумма, ₽
-        <input type="number" step="1" name="amount" inputmode="decimal" required>
-    </label>
-    <label>Дата
-        <input type="date" name="day" value="{{ today }}">
-    </label>
-    <div id="fuel-fields" class="fuel-fields" hidden>
-        <label>Заправка
-            <input list="stations" name="station" placeholder="Лукойл…">
-            <datalist id="stations">
-                {% for s in stations %}<option value="{{ s }}">{% endfor %}
-            </datalist>
-        </label>
-        <label>Литры
-            <input type="number" step="0.1" name="liters" inputmode="decimal">
-        </label>
-        <label>Оплата
-            <select name="payment_method">
-                <option value="">—</option>
-                {% for p in payments %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
-            </select>
-        </label>
-    </div>
-    <label>Комментарий
-        <input type="text" name="note" placeholder="необязательно">
-    </label>
-    <button type="submit" class="btn primary">Добавить</button>
-</form>
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
-
 <div class="monthnav">
     <a class="btn ghost" href="/expenses?ym={{ prev }}">‹</a>
-    <span>{{ ym }} · итого {{ '%.0f'|format(total) }} ₽</span>
+    <span>{{ ym }}</span>
     <a class="btn ghost" href="/expenses?ym={{ next }}">›</a>
 </div>
 
+<div class="summary">
+    <div class="summary-item">
+        <span class="summary-label">Итого за месяц</span>
+        <span class="summary-value">{{ '%.0f'|format(total) }} ₽</span>
+    </div>
+</div>
+
+{% if breakdown %}
+<div class="group">
+    <div class="group-title">По категориям</div>
+    {% for b in breakdown %}
+    <a class="cat-breakdown-row {{ 'active' if selected_category == b.id }}"
+       href="/expenses?ym={{ ym }}{% if selected_category != b.id %}&category_id={{ b.id }}{% endif %}">
+        <span class="cat-emoji">{{ b.emoji }}</span>
+        <span class="cat-title">{{ b.title }}</span>
+        <div class="bar"><div class="bar-fill" style="width: {{ b.pct }}%"></div></div>
+        <span class="cat-amount">{{ '%.0f'|format(b.amount) }} ₽</span>
+        <span class="cat-pct muted">{{ b.pct }}%</span>
+    </a>
+    {% endfor %}
+    {% if selected_category %}
+    <a class="btn ghost small" href="/expenses?ym={{ ym }}">✕ Сбросить фильтр</a>
+    {% endif %}
+</div>
+{% endif %}
+
+<details class="card">
+    <summary>➕ Добавить расход вручную</summary>
+    <form class="expense-form" method="post" action="/expenses">
+        <label>Категория
+            <select name="category_id" id="cat-select">
+                {% for c in categories %}
+                <option value="{{ c['id'] }}" data-slug="{{ c['slug'] }}">{{ c['emoji'] }} {{ c['title'] }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>Сумма, ₽
+            <input type="number" step="1" name="amount" inputmode="decimal" required>
+        </label>
+        <label>Дата
+            <input type="date" name="day" value="{{ today }}">
+        </label>
+        <div id="fuel-fields" class="fuel-fields" hidden>
+            <label>Заправка
+                <input list="stations" name="station" placeholder="Лукойл…">
+                <datalist id="stations">
+                    {% for s in stations %}<option value="{{ s }}">{% endfor %}
+                </datalist>
+            </label>
+            <label>Литры
+                <input type="number" step="0.1" name="liters" inputmode="decimal">
+            </label>
+            <label>Оплата
+                <select name="payment_method">
+                    <option value="">—</option>
+                    {% for p in payments %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+                </select>
+            </label>
+        </div>
+        <label>Комментарий
+            <input type="text" name="note" placeholder="необязательно">
+        </label>
+        <button type="submit" class="btn primary">Добавить</button>
+    </form>
+</details>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<div class="group-title">{% if selected_category %}Отфильтровано{% else %}Все операции{% endif %}</div>
 <div class="list">
     {% for e in entries %}
     <div class="list-row expense-row">

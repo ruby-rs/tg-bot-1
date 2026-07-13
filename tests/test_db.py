@@ -363,3 +363,129 @@ def test_delete_event(temp_db):
     event_id = temp_db.add_event(user_id, "Вместе", "2024-01-01")
     temp_db.delete_event(user_id, event_id)
     assert temp_db.get_events(user_id) == []
+
+
+def test_default_habits_cover_new_types(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habits = {h["title"]: h for h in temp_db.get_habits(user_id)}
+    assert habits["Вода"]["type"] == "number"
+    assert habits["Тренировка"]["type"] == "interval"
+    assert habits["Подработка"]["type"] == "interval"
+    assert habits["Покупки"]["type"] == "expense"
+    assert habits["Заправка"]["type"] == "fuel"
+    assert habits["Ипотека внесена"]["type"] == "bool"
+
+
+def test_habit_config_roundtrip(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(
+        user_id, "Тест", "Кат", habit_type="interval",
+        config={"has_amount": True, "subtype_options": ["A", "B"]},
+    )
+    habit = temp_db.get_habit(user_id, habit_id)
+    cfg = temp_db.habit_config(habit)
+    assert cfg == {"has_amount": True, "subtype_options": ["A", "B"]}
+
+
+def test_habit_config_empty_when_unset(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Тест", "Кат")
+    habit = temp_db.get_habit(user_id, habit_id)
+    assert temp_db.habit_config(habit) == {}
+
+
+def test_get_category_by_slug(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    category = temp_db.get_category_by_slug(user_id, "car")
+    assert category is not None
+    assert category["title"] == "Машина"
+    assert temp_db.get_category_by_slug(user_id, "does-not-exist") is None
+
+
+def test_add_and_get_habit_intervals(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Смена", "Работа", habit_type="interval")
+    day = "2026-07-01"
+    temp_db.add_habit_interval(habit_id, day, start_time="09:00", end_time="18:00")
+    temp_db.add_habit_interval(habit_id, day, start_time="19:00", end_time="20:00", subtype="Переработка")
+
+    intervals = temp_db.get_habit_intervals_for_date(habit_id, day)
+    assert len(intervals) == 2
+    assert intervals[1]["subtype"] == "Переработка"
+
+
+def test_delete_habit_interval_scoped_to_user(temp_db):
+    user_a = temp_db.get_or_create_user(111, "Alice")
+    user_b = temp_db.get_or_create_user(222, "Bob")
+    habit_id = temp_db.add_habit(user_a, "Смена", "Работа", habit_type="interval")
+    day = "2026-07-01"
+    interval_id = temp_db.add_habit_interval(habit_id, day, start_time="09:00", end_time="18:00")
+
+    temp_db.delete_habit_interval(user_b, interval_id)  # not owner, no-op
+    assert len(temp_db.get_habit_intervals_for_date(habit_id, day)) == 1
+
+    temp_db.delete_habit_interval(user_a, interval_id)
+    assert temp_db.get_habit_intervals_for_date(habit_id, day) == []
+
+
+def test_delete_habit_cascades_intervals(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Смена", "Работа", habit_type="interval")
+    day = "2026-07-01"
+    temp_db.add_habit_interval(habit_id, day, start_time="09:00", end_time="18:00")
+    temp_db.delete_habit(user_id, habit_id)
+    assert temp_db.get_habit_intervals_for_date(habit_id, day) == []
+
+
+def test_get_habit_intervals_for_month(temp_db):
+    user_id = temp_db.get_or_create_user(111, "Alice")
+    habit_id = temp_db.add_habit(user_id, "Смена", "Работа", habit_type="interval")
+    temp_db.add_habit_interval(habit_id, "2026-07-01", start_time="09:00", end_time="18:00")
+    temp_db.add_habit_interval(habit_id, "2026-06-15", start_time="09:00", end_time="18:00")
+
+    rows = temp_db.get_habit_intervals_for_month(user_id, "2026-07")
+    assert len(rows) == 1
+    assert rows[0]["log_date"] == "2026-07-01"
+
+
+def test_migration_removes_legacy_habits_and_backfills_new_ones(tmp_path):
+    """Existing users (registered before this schema change) should have their
+    built-in checkers upgraded in place: old ones removed/retyped, new ones added,
+    with habit_logs for removed habits cascaded away (no orphan rows)."""
+    import sqlite3
+
+    path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER UNIQUE NOT NULL, name TEXT, created_at TEXT NOT NULL);
+        CREATE TABLE categories (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, emoji TEXT NOT NULL, sort_order INTEGER NOT NULL, UNIQUE(user_id, slug));
+        CREATE TABLE habits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, category TEXT NOT NULL, sort_order INTEGER NOT NULL, type TEXT NOT NULL DEFAULT 'bool', unit TEXT, target REAL, UNIQUE(user_id, slug));
+        CREATE TABLE habit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, habit_id INTEGER NOT NULL, log_date TEXT NOT NULL, status TEXT NOT NULL, value REAL, UNIQUE(habit_id, log_date));
+        """
+    )
+    conn.execute("INSERT INTO users (tg_id, name, created_at) VALUES (999, 'Legacy', '2026-01-01')")
+    user_id = conn.execute("SELECT id FROM users WHERE tg_id = 999").fetchone()[0]
+    conn.execute(
+        "INSERT INTO habits (user_id, slug, title, category, sort_order) VALUES (?, 'productive_day', 'Продуктивный день', 'Работа', 0)",
+        (user_id,),
+    )
+    legacy_habit_id = conn.execute("SELECT id FROM habits WHERE slug = 'productive_day'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO habit_logs (habit_id, log_date, status) VALUES (?, '2026-01-05', 'done')",
+        (legacy_habit_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    from bot import db as botdb
+    botdb.init_db(path)
+
+    with botdb.get_conn() as conn:
+        slugs = {row["slug"] for row in conn.execute("SELECT slug FROM habits WHERE user_id = ?", (user_id,)).fetchall()}
+        assert "productive_day" not in slugs
+        assert "side_job" in slugs
+        orphan_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM habit_logs WHERE habit_id = ?", (legacy_habit_id,)
+        ).fetchone()["c"]
+        assert orphan_count == 0

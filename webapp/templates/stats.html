@@ -21,6 +21,12 @@
         {% elif r['type'] == 'number' %}
         <div class="bar"></div>
         <b>{{ '%.1f'|format(r['value_sum'] or 0) }}{{ r['unit'] or '' }}</b>
+        {% elif r['type'] == 'interval' %}
+        <div class="bar"></div>
+        <b>{{ '%.1f'|format(r['hours'] or 0) }} ч{% if r['interval_amount'] %} · {{ '%.0f'|format(r['interval_amount']) }} ₽{% endif %}</b>
+        {% elif r['type'] in ('expense', 'fuel') %}
+        <div class="bar"></div>
+        <b>{{ '%.0f'|format(r['expense_amount'] or 0) }} ₽</b>
         {% else %}
         <div class="bar"></div>
         <b>{{ r['note_count'] or 0 }} зап.</b>

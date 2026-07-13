@@ -20,7 +20,7 @@
             {% else %}
                 {% set date_str = "%04d-%02d-%02d"|format(year, month, day) %}
                 <a class="cal-cell {{ 'today' if date_str == today }} {{ 'has' if summary.get(date_str) }}"
-                   href="/day/{{ date_str }}">
+                   href="/?day={{ date_str }}">
                     <span class="num">{{ day }}</span>
                     {% if summary.get(date_str) %}<span class="dot">{{ summary[date_str] }}</span>{% endif %}
                 </a>
@@ -38,7 +38,7 @@
             <tr>
                 <th class="grid-label-col">Чекер</th>
                 {% for dh in day_headers %}
-                <th class="{{ 'today' if dh.is_today }}"><a href="/day/{{ dh.date }}">{{ dh.num }}<br><small>{{ dh.weekday }}</small></a></th>
+                <th class="{{ 'today' if dh.is_today }}"><a href="/?day={{ dh.date }}">{{ dh.num }}<br><small>{{ dh.weekday }}</small></a></th>
                 {% endfor %}
                 <th class="grid-total-col">Итого</th>
             </tr>

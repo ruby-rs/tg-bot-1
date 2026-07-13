@@ -1,8 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Сегодня · Трекер{% endblock %}
-{% block heading %}Сегодня{% endblock %}
+{% block title %}{{ 'Сегодня' if is_today else day }} · Трекер{% endblock %}
+{% block heading %}{{ 'Сегодня' if is_today else day }}{% endblock %}
 {% block header_extra %}<a class="topbar-link" href="/logout">Выйти</a>{% endblock %}
 {% block content %}
+<div class="daynav">
+    <a class="btn ghost" href="/?day={{ prev_day }}">‹</a>
+    {% if not is_today %}<a class="btn ghost daynav-today" href="/">Сегодня</a>{% endif %}
+    <a class="btn ghost" href="/calendar?ym={{ day[:7] }}">📅</a>
+    <a class="btn ghost" href="/?day={{ next_day }}">›</a>
+</div>
+
+{% if is_today %}
 <div class="summary">
     <div class="summary-item">
         <span class="summary-label">Вес</span>
@@ -28,6 +36,7 @@
     </div>
     {% endfor %}
 </div>
+{% endif %}
 {% endif %}
 
 {% include "partials/checkers.html" %}

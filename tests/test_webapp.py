@@ -40,9 +40,11 @@ def test_login_and_panel(client):
 def test_toggle_checker_updates_partial(client):
     client.post("/login", data={"password": "secret"})
     user_id = db.get_or_create_user(0, "Веб")
-    habit = db.get_habits(user_id)[0]
+    # The only built-in bool checker (mortgage) is restricted to the 16th of
+    # the month, so use a plain custom one to test the generic toggle path.
+    habit_id = db.add_habit(user_id, "Тест", "Категория", habit_type="bool")
     today = db.today()
-    resp = client.post(f"/checker/{habit['id']}/toggle", data={"day": today})
+    resp = client.post(f"/checker/{habit_id}/toggle", data={"day": today})
     assert resp.status_code == 200
     assert "Отмечено сегодня: <b>1/" in resp.text
 
@@ -170,3 +172,122 @@ def test_calendar_grid_shows_checkers_and_values(client):
     assert resp.status_code == 200
     assert "grid-table" in resp.text
     assert "Белок" in resp.text
+
+
+def test_day_navigation_prev_next(client):
+    client.post("/login", data={"password": "secret"})
+    resp = client.get("/?day=2026-07-15")
+    assert resp.status_code == 200
+    assert "/?day=2026-07-14" in resp.text
+    assert "/?day=2026-07-16" in resp.text
+
+
+def test_old_day_url_redirects_to_query_param(client):
+    client.post("/login", data={"password": "secret"})
+    resp = client.get("/day/2026-07-15", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/?day=2026-07-15"
+
+
+def test_mortgage_checker_locked_outside_restricted_day(client):
+    client.post("/login", data={"password": "secret"})
+    user_id = db.get_or_create_user(0, "Веб")
+    habit = next(h for h in db.get_habits(user_id) if h["title"] == "Ипотека внесена")
+
+    resp = client.post(f"/checker/{habit['id']}/toggle", data={"day": "2026-07-01"})
+    assert resp.status_code == 200
+    logs = db.get_habit_logs_for_month(user_id, "2026-07")
+    assert (habit["id"], "2026-07-01") not in logs
+
+    resp = client.post(f"/checker/{habit['id']}/toggle", data={"day": "2026-07-16"})
+    logs = db.get_habit_logs_for_month(user_id, "2026-07")
+    assert (habit["id"], "2026-07-16") in logs
+
+
+def test_interval_checker_add_and_delete(client):
+    client.post("/login", data={"password": "secret"})
+    user_id = db.get_or_create_user(0, "Веб")
+    habit = next(h for h in db.get_habits(user_id) if h["title"] == "Тренировка")
+    today = db.today()
+
+    resp = client.post(
+        f"/checker/{habit['id']}/interval",
+        data={"day": today, "start_time": "18:00", "end_time": "19:00", "period": "Вечер", "subtype": "Бег"},
+    )
+    assert "Бег" in resp.text and "18:00" in resp.text
+    intervals = db.get_habit_intervals_for_date(habit["id"], today)
+    assert len(intervals) == 1
+
+    resp = client.post(f"/interval/{intervals[0]['id']}/delete", data={"day": today})
+    assert db.get_habit_intervals_for_date(habit["id"], today) == []
+
+
+def test_side_job_interval_with_amount_and_stats(client):
+    client.post("/login", data={"password": "secret"})
+    user_id = db.get_or_create_user(0, "Веб")
+    habit = next(h for h in db.get_habits(user_id) if h["title"] == "Подработка")
+    today = db.today()
+
+    client.post(
+        f"/checker/{habit['id']}/interval",
+        data={"day": today, "start_time": "10:00", "end_time": "14:00", "subtype": "Водитель", "amount": "3000"},
+    )
+    resp = client.get("/stats")
+    assert resp.status_code == 200
+    assert "3000" in resp.text
+
+
+def test_purchases_and_gift_checkers_roll_into_expenses(client):
+    client.post("/login", data={"password": "secret"})
+    user_id = db.get_or_create_user(0, "Веб")
+    today = db.today()
+
+    purchases = next(h for h in db.get_habits(user_id) if h["title"] == "Покупки")
+    gift = next(h for h in db.get_habits(user_id) if h["title"] == "Подарок")
+
+    client.post(f"/checker/{purchases['id']}/expense", data={"day": today, "name": "Продукты", "amount": "1500"})
+    client.post(f"/checker/{gift['id']}/expense", data={"day": today, "name": "Цветы", "amount": "800"})
+
+    entries = db.get_expenses_for_month(user_id, today[:7])
+    assert {e["note"] for e in entries} == {"Продукты", "Цветы"}
+    assert sum(e["amount"] for e in entries) == 2300
+
+    resp = client.get("/expenses")
+    assert "Продукты" in resp.text or "Цветы" in resp.text
+
+
+def test_fuel_checker_creates_fuel_expense(client):
+    client.post("/login", data={"password": "secret"})
+    user_id = db.get_or_create_user(0, "Веб")
+    today = db.today()
+    habit = next(h for h in db.get_habits(user_id) if h["title"] == "Заправка")
+
+    resp = client.post(
+        f"/checker/{habit['id']}/fuel",
+        data={"day": today, "station": "Лукойл", "liters": "30", "amount": "2100", "payment_method": "Карта"},
+    )
+    assert "Лукойл" in resp.text
+    entries = db.get_expenses_for_month(user_id, today[:7])
+    fuel_entries = [e for e in entries if e["station"]]
+    assert len(fuel_entries) == 1
+    assert fuel_entries[0]["liters"] == 30.0
+
+
+def test_checkers_constructor_creates_interval_with_config(client):
+    client.post("/login", data={"password": "secret"})
+    user_id = db.get_or_create_user(0, "Веб")
+
+    resp = client.post(
+        "/checkers",
+        data={
+            "title": "Кастом", "category": "Тест", "habit_type": "interval",
+            "has_amount": "1", "amount_label": "Стоимость",
+            "free_subtype": "1", "subtype_label": "Название",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    habit = next(h for h in db.get_habits(user_id) if h["title"] == "Кастом")
+    cfg = db.habit_config(habit)
+    assert cfg["has_amount"] is True
+    assert cfg["free_subtype"] is True

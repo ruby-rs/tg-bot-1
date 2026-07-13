@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Вес · Трекер{% endblock %}
+{% block heading %}Вес{% endblock %}
+{% block content %}
+<form class="card row-form" method="post" action="/weight">
+    <input type="number" step="0.1" name="value" placeholder="кг, напр. 61.5"
+           inputmode="decimal" required>
+    <button type="submit" class="btn primary">Записать</button>
+</form>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<div class="list">
+    {% for w in weights %}
+    <div class="list-row">
+        <span>{{ w['logged_at'][:10] }}</span>
+        <b>{{ w['weight'] }} кг</b>
+        <form method="post" action="/weight/{{ w['id'] }}/delete" class="inline">
+            <button class="btn tiny danger" type="submit">✕</button>
+        </form>
+    </div>
+    {% else %}
+    <p class="muted center">Пока нет записей.</p>
+    {% endfor %}
+</div>
+{% endblock %}

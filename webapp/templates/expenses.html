@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Расходы · Трекер{% endblock %}
+{% block heading %}Расходы{% endblock %}
+{% block content %}
+<form class="card expense-form" method="post" action="/expenses">
+    <label>Категория
+        <select name="category_id" id="cat-select">
+            {% for c in categories %}
+            <option value="{{ c['id'] }}" data-slug="{{ c['slug'] }}">{{ c['emoji'] }} {{ c['title'] }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>Сумма, ₽
+        <input type="number" step="1" name="amount" inputmode="decimal" required>
+    </label>
+    <label>Дата
+        <input type="date" name="day" value="{{ today }}">
+    </label>
+    <div id="fuel-fields" class="fuel-fields" hidden>
+        <label>Заправка
+            <input list="stations" name="station" placeholder="Лукойл…">
+            <datalist id="stations">
+                {% for s in stations %}<option value="{{ s }}">{% endfor %}
+            </datalist>
+        </label>
+        <label>Литры
+            <input type="number" step="0.1" name="liters" inputmode="decimal">
+        </label>
+        <label>Оплата
+            <select name="payment_method">
+                <option value="">—</option>
+                {% for p in payments %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+            </select>
+        </label>
+    </div>
+    <label>Комментарий
+        <input type="text" name="note" placeholder="необязательно">
+    </label>
+    <button type="submit" class="btn primary">Добавить</button>
+</form>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<div class="monthnav">
+    <a class="btn ghost" href="/expenses?ym={{ prev }}">‹</a>
+    <span>{{ ym }} · итого {{ '%.0f'|format(total) }} ₽</span>
+    <a class="btn ghost" href="/expenses?ym={{ next }}">›</a>
+</div>
+
+<div class="list">
+    {% for e in entries %}
+    <div class="list-row expense-row">
+        <div class="expense-main">
+            <span>{{ e['category_emoji'] }} {{ e['category_title'] }}</span>
+            <small class="muted">
+                {{ e['logged_at'][:10] }}{% if e['station'] %} · {{ e['station'] }} · {{ e['liters'] }} л · {{ e['payment_method'] }}{% elif e['note'] %} · {{ e['note'] }}{% endif %}
+            </small>
+        </div>
+        <b>{{ '%.0f'|format(e['amount']) }} ₽</b>
+        <form method="post" action="/expenses/{{ e['id'] }}/delete" class="inline">
+            <button class="btn tiny danger" type="submit">✕</button>
+        </form>
+    </div>
+    {% else %}
+    <p class="muted center">Расходов за месяц нет.</p>
+    {% endfor %}
+</div>
+
+<script>
+(function () {
+    var sel = document.getElementById('cat-select');
+    var fuel = document.getElementById('fuel-fields');
+    function sync() {
+        var opt = sel.options[sel.selectedIndex];
+        fuel.hidden = !(opt && opt.dataset.slug === 'car');
+    }
+    sel.addEventListener('change', sync);
+    sync();
+})();
+</script>
+{% endblock %}

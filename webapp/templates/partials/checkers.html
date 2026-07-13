@@ -1,0 +1,25 @@
+<div id="checkers">
+    <p class="muted counter">Отмечено сегодня: <b>{{ done }}/{{ total }}</b></p>
+    {% for category, items in groups %}
+    <div class="group">
+        <div class="group-title">{{ category }}</div>
+        {% for h in items %}
+        <button class="checker {{ STATUS_CLASS[h['status']] }}"
+                hx-post="/checker/{{ h['id'] }}/toggle"
+                hx-vals='{"day": "{{ day }}"}'
+                hx-target="#checkers" hx-swap="outerHTML">
+            <span class="mark">{{ STATUS_LABEL[h['status']] }}</span>
+            <span class="label">{{ h['title'] }}</span>
+        </button>
+        {% endfor %}
+    </div>
+    {% endfor %}
+    {% if fuel %}
+    <div class="group">
+        <div class="group-title">⛽️ Заправки</div>
+        {% for e in fuel %}
+        <div class="fuel-row">{{ e['station'] }} · {{ e['liters'] }} л · {{ '%.0f'|format(e['amount']) }} ₽ · {{ e['payment_method'] }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>

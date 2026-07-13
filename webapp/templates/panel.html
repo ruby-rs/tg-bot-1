@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Сегодня · Трекер{% endblock %}
+{% block heading %}Сегодня{% endblock %}
+{% block header_extra %}<a class="topbar-link" href="/logout">Выйти</a>{% endblock %}
+{% block content %}
+<div class="summary">
+    <div class="summary-item">
+        <span class="summary-label">Вес</span>
+        <span class="summary-value">{% if latest_weight is not none %}{{ latest_weight }} кг{% else %}—{% endif %}</span>
+    </div>
+    <div class="summary-item">
+        <span class="summary-label">Расходы / мес</span>
+        <span class="summary-value">{{ '%.0f'|format(expense_total) }} ₽</span>
+    </div>
+</div>
+
+{% include "partials/checkers.html" %}
+{% endblock %}

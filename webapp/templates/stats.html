@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Статистика · Трекер{% endblock %}
+{% block heading %}Статистика{% endblock %}
+{% block content %}
+<div class="monthnav">
+    <a class="btn ghost" href="/stats?ym={{ prev }}">‹</a>
+    <span>{{ ym }}</span>
+    <a class="btn ghost" href="/stats?ym={{ next }}">›</a>
+</div>
+
+{% for category, items in groups %}
+<div class="group">
+    <div class="group-title">{{ category }}</div>
+    {% for r in items %}
+    <div class="stat-row">
+        <span class="stat-label">{{ r['title'] }}</span>
+        <div class="bar"><div class="bar-fill" style="width: {{ (100 * r['done'] / r['total'])|round }}%"></div></div>
+        <b>{{ r['done'] }}</b>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% endblock %}

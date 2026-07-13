@@ -8,7 +8,7 @@ import os
 import secrets
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -34,7 +34,10 @@ MONTHS_RU = [
 WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 STATUS_CLASS = {"done": "done", "skip": "skip", None: "none"}
 STATUS_LABEL = {"done": "✅", "skip": "❌", None: "➖"}
-HABIT_TYPE_LABEL = {"bool": "Да/нет", "number": "Число", "note": "Заметка"}
+HABIT_TYPE_LABEL = {
+    "bool": "Да/нет", "number": "Число", "note": "Заметка",
+    "interval": "Интервал времени", "expense": "Список расходов", "fuel": "Заправка",
+}
 
 
 @asynccontextmanager
@@ -50,7 +53,9 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), na
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 templates.env.globals.update(
     MONTHS_RU=MONTHS_RU, STATUS_CLASS=STATUS_CLASS, STATUS_LABEL=STATUS_LABEL,
-    HABIT_TYPE_LABEL=HABIT_TYPE_LABEL,
+    HABIT_TYPE_LABEL=HABIT_TYPE_LABEL, WORKOUT_TYPES=db.WORKOUT_TYPES,
+    SIDE_JOB_TYPES=db.SIDE_JOB_TYPES, DAY_PERIODS=db.DAY_PERIODS,
+    db_fuel_stations=db.FUEL_STATIONS, db_payment_methods=db.PAYMENT_METHODS,
 )
 
 
@@ -70,6 +75,11 @@ def today_str() -> str:
 
 def this_month() -> str:
     return today_str()[:7]
+
+
+def shift_day(day: str, delta: int) -> str:
+    y, m, d = map(int, day.split("-"))
+    return (date(y, m, d) + timedelta(days=delta)).isoformat()
 
 
 def shift_month(year_month: str, delta: int) -> str:
@@ -94,6 +104,24 @@ def parse_number(raw):
         return float(str(raw).replace(",", "."))
     except ValueError:
         return None
+
+
+def interval_minutes(start: str, end: str) -> float:
+    if not start or not end:
+        return 0
+    try:
+        sh, sm = map(int, start.split(":"))
+        eh, em = map(int, end.split(":"))
+    except ValueError:
+        return 0
+    start_min, end_min = sh * 60 + sm, eh * 60 + em
+    if end_min < start_min:
+        end_min += 24 * 60
+    return end_min - start_min
+
+
+def parse_options(raw: str):
+    return [line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -157,32 +185,60 @@ def events_context(user_id: int):
 
 
 # ---------------------------------------------------------------------------
-# Panel — today's checkers
+# Day view (the "Сегодня" page doubles as a view for any day, with prev/next)
 # ---------------------------------------------------------------------------
 
 def build_day_context(user_id: int, day: str):
     rows = db.get_habit_logs_for_date(user_id, day)
     done = sum(1 for r in rows if r["type"] == "bool" and r["status"] == "done")
     total_bool = sum(1 for r in rows if r["type"] == "bool")
-    entries_by_habit = {
-        r["id"]: db.get_habit_entries_for_date(r["id"], day) for r in rows if r["type"] == "note"
-    }
-    fuel = [e for e in db.get_expenses_for_date(user_id, day) if e["station"]]
+
+    entries_by_habit = {}
+    intervals_by_habit = {}
+    expense_entries_by_habit = {}
+    configs_by_habit = {}
+    day_num = int(day.split("-")[2])
+
+    day_expenses = db.get_expenses_for_date(user_id, day)
+
+    for r in rows:
+        cfg = db.habit_config(r)
+        configs_by_habit[r["id"]] = cfg
+        if r["type"] == "note":
+            entries_by_habit[r["id"]] = db.get_habit_entries_for_date(r["id"], day)
+        elif r["type"] == "interval":
+            intervals_by_habit[r["id"]] = db.get_habit_intervals_for_date(r["id"], day)
+        elif r["type"] in ("expense", "fuel"):
+            cat_slug = cfg.get("category_slug")
+            wants_fuel = r["type"] == "fuel"
+            matching = [
+                e for e in day_expenses
+                if e["category_id"] and e["category_slug"] == cat_slug
+                and bool(e["station"]) == wants_fuel
+            ] if cat_slug else []
+            expense_entries_by_habit[r["id"]] = matching
+
     return {
         "day": day,
+        "prev_day": shift_day(day, -1),
+        "next_day": shift_day(day, 1),
         "groups": group_by_category(rows),
         "entries_by_habit": entries_by_habit,
+        "intervals_by_habit": intervals_by_habit,
+        "expense_entries_by_habit": expense_entries_by_habit,
+        "configs_by_habit": configs_by_habit,
         "done": done,
         "total": total_bool,
-        "fuel": fuel,
+        "day_num": day_num,
         "is_today": day == today_str(),
     }
 
 
 @app.get("/", response_class=HTMLResponse)
-def panel(request: Request, _=Depends(require_login)):
+def panel(request: Request, day: str = None, _=Depends(require_login)):
     user_id = current_user_id()
-    ctx = build_day_context(user_id, today_str())
+    day = day or today_str()
+    ctx = build_day_context(user_id, day)
     weights = db.get_weights(user_id, limit=1)
     expenses = db.expense_totals_this_month(user_id)
     ctx.update(
@@ -197,15 +253,27 @@ def panel(request: Request, _=Depends(require_login)):
     return templates.TemplateResponse("panel.html", ctx)
 
 
+@app.get("/day/{day}", response_class=HTMLResponse)
+def day_view_redirect(day: str):
+    """Old calendar links point here; the day view now lives on the panel itself."""
+    return RedirectResponse(f"/?day={day}", status_code=303)
+
+
+def _checker_response(request, user_id, day):
+    ctx = build_day_context(user_id, day)
+    ctx["request"] = request
+    return templates.TemplateResponse("partials/checkers.html", ctx)
+
+
 @app.post("/checker/{habit_id}/toggle", response_class=HTMLResponse)
 def toggle_checker(request: Request, habit_id: int, day: str = Form(...), _=Depends(require_login)):
     user_id = current_user_id()
     habit = db.get_habit(user_id, habit_id)
     if habit is not None and habit["type"] == "bool":
-        db.toggle_habit_log(habit_id, day)
-    ctx = build_day_context(user_id, day)
-    ctx["request"] = request
-    return templates.TemplateResponse("partials/checkers.html", ctx)
+        restrict_day = db.habit_config(habit).get("restrict_day")
+        if not restrict_day or int(day.split("-")[2]) == restrict_day:
+            db.toggle_habit_log(habit_id, day)
+    return _checker_response(request, user_id, day)
 
 
 @app.post("/checker/{habit_id}/value", response_class=HTMLResponse)
@@ -221,9 +289,7 @@ def set_checker_value(
             db.clear_habit_value(habit_id, day)
         else:
             db.set_habit_value(habit_id, day, v)
-    ctx = build_day_context(user_id, day)
-    ctx["request"] = request
-    return templates.TemplateResponse("partials/checkers.html", ctx)
+    return _checker_response(request, user_id, day)
 
 
 @app.post("/checker/{habit_id}/entry", response_class=HTMLResponse)
@@ -235,18 +301,91 @@ def add_checker_entry(
     habit = db.get_habit(user_id, habit_id)
     if habit is not None and habit["type"] == "note" and text.strip():
         db.add_habit_entry(habit_id, day, text.strip())
-    ctx = build_day_context(user_id, day)
-    ctx["request"] = request
-    return templates.TemplateResponse("partials/checkers.html", ctx)
+    return _checker_response(request, user_id, day)
 
 
 @app.post("/entry/{entry_id}/delete", response_class=HTMLResponse)
 def delete_entry(request: Request, entry_id: int, day: str = Form(...), _=Depends(require_login)):
     user_id = current_user_id()
     db.delete_habit_entry(user_id, entry_id)
-    ctx = build_day_context(user_id, day)
-    ctx["request"] = request
-    return templates.TemplateResponse("partials/checkers.html", ctx)
+    return _checker_response(request, user_id, day)
+
+
+@app.post("/checker/{habit_id}/interval", response_class=HTMLResponse)
+def add_checker_interval(
+    request: Request, habit_id: int, day: str = Form(...),
+    start_time: str = Form(""), end_time: str = Form(""),
+    period: str = Form(""), subtype: str = Form(""), amount: str = Form(""),
+    _=Depends(require_login),
+):
+    user_id = current_user_id()
+    habit = db.get_habit(user_id, habit_id)
+    if habit is not None and habit["type"] == "interval":
+        db.add_habit_interval(
+            habit_id, day,
+            start_time=start_time or None, end_time=end_time or None,
+            period=period or None, subtype=subtype.strip() or None,
+            amount=parse_number(amount),
+        )
+    return _checker_response(request, user_id, day)
+
+
+@app.post("/interval/{interval_id}/delete", response_class=HTMLResponse)
+def delete_interval(request: Request, interval_id: int, day: str = Form(...), _=Depends(require_login)):
+    user_id = current_user_id()
+    db.delete_habit_interval(user_id, interval_id)
+    return _checker_response(request, user_id, day)
+
+
+@app.post("/checker/{habit_id}/expense", response_class=HTMLResponse)
+def add_checker_expense(
+    request: Request, habit_id: int, day: str = Form(...),
+    name: str = Form(""), amount: str = Form(""),
+    _=Depends(require_login),
+):
+    user_id = current_user_id()
+    habit = db.get_habit(user_id, habit_id)
+    amt = parse_number(amount)
+    if habit is not None and habit["type"] == "expense" and amt is not None and amt > 0:
+        cfg = db.habit_config(habit)
+        category = db.get_category_by_slug(user_id, cfg.get("category_slug", ""))
+        if category is not None:
+            db.add_expense(
+                user_id, category["id"], amt, note=name.strip(),
+                logged_at=f"{day}T12:00:00+00:00",
+            )
+    return _checker_response(request, user_id, day)
+
+
+@app.post("/checker/{habit_id}/fuel", response_class=HTMLResponse)
+def add_checker_fuel(
+    request: Request, habit_id: int, day: str = Form(...),
+    station: str = Form(""), liters: str = Form(""),
+    amount: str = Form(""), payment_method: str = Form(""),
+    _=Depends(require_login),
+):
+    user_id = current_user_id()
+    habit = db.get_habit(user_id, habit_id)
+    amt = parse_number(amount)
+    if habit is not None and habit["type"] == "fuel" and amt is not None and amt > 0:
+        cfg = db.habit_config(habit)
+        category = db.get_category_by_slug(user_id, cfg.get("category_slug", "car"))
+        if category is not None:
+            db.add_expense(
+                user_id, category["id"], amt,
+                note=f"{station}, {liters} л" if station else "",
+                liters=parse_number(liters), station=station or None,
+                payment_method=payment_method or None,
+                logged_at=f"{day}T12:00:00+00:00",
+            )
+    return _checker_response(request, user_id, day)
+
+
+@app.post("/expense-entry/{expense_id}/delete", response_class=HTMLResponse)
+def delete_expense_entry(request: Request, expense_id: int, day: str = Form(...), _=Depends(require_login)):
+    user_id = current_user_id()
+    db.delete_expense(user_id, expense_id)
+    return _checker_response(request, user_id, day)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +400,25 @@ def build_grid_context(user_id: int, ym: str):
     habits = db.get_habits(user_id)
     logs = db.get_habit_logs_for_month(user_id, ym)
     note_counts = db.get_habit_entry_counts_for_month(user_id, ym)
+    intervals = db.get_habit_intervals_for_month(user_id, ym)
+    expenses = db.get_expenses_for_month(user_id, ym)
+
+    interval_hours_by_day = {}
+    interval_amount_by_day = {}
+    for iv in intervals:
+        key = (iv["habit_id"], iv["log_date"])
+        interval_hours_by_day[key] = interval_hours_by_day.get(key, 0) + interval_minutes(
+            iv["start_time"], iv["end_time"]
+        ) / 60
+        if iv["amount"]:
+            interval_amount_by_day[key] = interval_amount_by_day.get(key, 0) + iv["amount"]
+
+    expense_amount_by_day = {}
+    for e in expenses:
+        expense_amount_by_day.setdefault(e["category_slug"], {}).setdefault(bool(e["station"]), {})
+        d = e["logged_at"][:10]
+        bucket = expense_amount_by_day[e["category_slug"]][bool(e["station"])]
+        bucket[d] = bucket.get(d, 0) + e["amount"]
 
     grouped = OrderedDict()
     for h in habits:
@@ -270,6 +428,7 @@ def build_grid_context(user_id: int, ym: str):
     for category, items in grouped.items():
         grid_habits = []
         for h in items:
+            cfg = db.habit_config(h)
             cells = []
             total = 0
             for d in day_strs:
@@ -282,6 +441,15 @@ def build_grid_context(user_id: int, ym: str):
                     val = row["value"] if row else None
                     cells.append({"text": f"{val:g}" if val is not None else "—", "on": val is not None})
                     total += val or 0
+                elif h["type"] == "interval":
+                    hours = interval_hours_by_day.get((h["id"], d), 0)
+                    cells.append({"text": f"{hours:g}ч" if hours else "—", "on": bool(hours)})
+                    total += hours
+                elif h["type"] in ("expense", "fuel"):
+                    bucket = expense_amount_by_day.get(cfg.get("category_slug"), {}).get(h["type"] == "fuel", {})
+                    amt = bucket.get(d, 0)
+                    cells.append({"text": f"{amt:g}" if amt else "—", "on": bool(amt)})
+                    total += amt
                 else:
                     row = logs.get((h["id"], d))
                     status = row["status"] if row else None
@@ -289,6 +457,10 @@ def build_grid_context(user_id: int, ym: str):
                     total += 1 if status == "done" else 0
             if h["type"] == "bool":
                 total_text = str(int(total))
+            elif h["type"] == "interval":
+                total_text = f"{total:g}ч"
+            elif h["type"] in ("expense", "fuel"):
+                total_text = f"{total:g}₽"
             else:
                 total_text = f"{total:g}" + (f" {h['unit']}" if h["unit"] else "")
             grid_habits.append({"habit": h, "cells": cells, "total": total_text})
@@ -318,14 +490,6 @@ def calendar_view(request: Request, ym: str = None, _=Depends(require_login)):
     }
     ctx.update(build_grid_context(user_id, ym))
     return templates.TemplateResponse("calendar.html", ctx)
-
-
-@app.get("/day/{day}", response_class=HTMLResponse)
-def day_view(request: Request, day: str, _=Depends(require_login)):
-    user_id = current_user_id()
-    ctx = build_day_context(user_id, day)
-    ctx.update({"request": request, "active": "calendar"})
-    return templates.TemplateResponse("day.html", ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -373,20 +537,38 @@ def weight_delete(weight_id: int, _=Depends(require_login)):
 
 
 # ---------------------------------------------------------------------------
-# Expenses
+# Expenses — grouped by category with shares, like a personal-finance app
 # ---------------------------------------------------------------------------
 
 @app.get("/expenses", response_class=HTMLResponse)
-def expenses_page(request: Request, ym: str = None, _=Depends(require_login)):
+def expenses_page(request: Request, ym: str = None, category_id: str = None, _=Depends(require_login)):
     user_id = current_user_id()
     ym = ym or this_month()
     entries = db.get_expenses_for_month(user_id, ym)
+    if category_id:
+        entries = [e for e in entries if str(e["category_id"]) == category_id]
     total = sum(e["amount"] for e in entries)
+
+    by_category = OrderedDict()
+    for e in db.get_expenses_for_month(user_id, ym):
+        key = (e["category_id"], e["category_title"], e["category_emoji"])
+        by_category[key] = by_category.get(key, 0) + e["amount"]
+    grand_total = sum(by_category.values()) or 1
+    breakdown = sorted(
+        [
+            {"id": cid, "title": title, "emoji": emoji, "amount": amt,
+             "pct": round(100 * amt / grand_total)}
+            for (cid, title, emoji), amt in by_category.items()
+        ],
+        key=lambda r: -r["amount"],
+    )
+
     return templates.TemplateResponse(
         "expenses.html",
         {
             "request": request, "active": "expenses",
-            "ym": ym, "entries": entries, "total": total,
+            "ym": ym, "entries": entries, "total": total, "breakdown": breakdown,
+            "selected_category": int(category_id) if category_id else None,
             "categories": db.get_categories(user_id),
             "stations": db.FUEL_STATIONS, "payments": db.PAYMENT_METHODS,
             "prev": shift_month(ym, -1), "next": shift_month(ym, 1),
@@ -430,7 +612,7 @@ def _expenses_error(request, user_id, message):
         "expenses.html",
         {
             "request": request, "active": "expenses", "ym": ym, "entries": entries,
-            "total": sum(e["amount"] for e in entries),
+            "total": sum(e["amount"] for e in entries), "breakdown": [], "selected_category": None,
             "categories": db.get_categories(user_id),
             "stations": db.FUEL_STATIONS, "payments": db.PAYMENT_METHODS,
             "prev": shift_month(ym, -1), "next": shift_month(ym, 1),
@@ -457,6 +639,34 @@ def stats_page(request: Request, ym: str = None, _=Depends(require_login)):
     year, month = map(int, ym.split("-"))
     days_in_month = calendar_module.monthrange(year, month)[1]
     rows = db.get_habit_month_stats(user_id, ym)
+
+    intervals = db.get_habit_intervals_for_month(user_id, ym)
+    hours_by_habit, amount_by_habit = {}, {}
+    for iv in intervals:
+        hours_by_habit[iv["habit_id"]] = hours_by_habit.get(iv["habit_id"], 0) + interval_minutes(
+            iv["start_time"], iv["end_time"]
+        ) / 60
+        if iv["amount"]:
+            amount_by_habit[iv["habit_id"]] = amount_by_habit.get(iv["habit_id"], 0) + iv["amount"]
+
+    expenses = db.get_expenses_for_month(user_id, ym)
+    expense_amount_by_habit = {}
+    habits_by_id = {h["id"]: h for h in db.get_habits(user_id)}
+    for h in habits_by_id.values():
+        if h["type"] not in ("expense", "fuel"):
+            continue
+        cfg = db.habit_config(h)
+        total = sum(
+            e["amount"] for e in expenses
+            if e["category_slug"] == cfg.get("category_slug") and bool(e["station"]) == (h["type"] == "fuel")
+        )
+        expense_amount_by_habit[h["id"]] = total
+
+    for r in rows:
+        r["hours"] = hours_by_habit.get(r["id"], 0)
+        r["interval_amount"] = amount_by_habit.get(r["id"], 0)
+        r["expense_amount"] = expense_amount_by_habit.get(r["id"], 0)
+
     grouped = OrderedDict()
     for r in rows:
         grouped.setdefault(r["category"], []).append(r)
@@ -471,22 +681,28 @@ def stats_page(request: Request, ym: str = None, _=Depends(require_login)):
 
 
 # ---------------------------------------------------------------------------
-# Manage checkers (create / edit / delete custom items)
+# Manage checkers (create / edit / delete custom items) — the "constructor"
 # ---------------------------------------------------------------------------
 
-@app.get("/checkers", response_class=HTMLResponse)
-def checkers_page(request: Request, _=Depends(require_login)):
-    user_id = current_user_id()
+def _checkers_ctx(user_id, error=None):
     habits = db.get_habits(user_id)
     grouped = OrderedDict()
     for h in habits:
         grouped.setdefault(h["category"], []).append(h)
-    categories = sorted({h["category"] for h in habits})
-    return templates.TemplateResponse(
-        "checkers.html",
-        {"request": request, "active": "more", "groups": list(grouped.items()),
-         "categories": categories, "error": None},
-    )
+    return {
+        "groups": list(grouped.items()),
+        "categories": sorted({h["category"] for h in habits}),
+        "expense_categories": db.get_categories(user_id),
+        "error": error,
+    }
+
+
+@app.get("/checkers", response_class=HTMLResponse)
+def checkers_page(request: Request, _=Depends(require_login)):
+    user_id = current_user_id()
+    ctx = _checkers_ctx(user_id)
+    ctx.update({"request": request, "active": "more"})
+    return templates.TemplateResponse("checkers.html", ctx)
 
 
 @app.post("/checkers")
@@ -497,26 +713,43 @@ def checkers_add(
     habit_type: str = Form("bool"),
     unit: str = Form(""),
     target: str = Form(""),
+    has_period: str = Form(None),
+    has_amount: str = Form(None),
+    amount_label: str = Form(""),
+    free_subtype: str = Form(None),
+    subtype_label: str = Form(""),
+    subtype_options: str = Form(""),
+    expense_category_id: str = Form(""),
     _=Depends(require_login),
 ):
     user_id = current_user_id()
     title = title.strip()
     category = category.strip()
     if not title or not category:
-        habits = db.get_habits(user_id)
-        grouped = OrderedDict()
-        for h in habits:
-            grouped.setdefault(h["category"], []).append(h)
-        return templates.TemplateResponse(
-            "checkers.html",
-            {"request": request, "active": "more", "groups": list(grouped.items()),
-             "categories": sorted({h["category"] for h in habits}),
-             "error": "Название и категория обязательны."},
-            status_code=400,
-        )
+        ctx = _checkers_ctx(user_id, "Название и категория обязательны.")
+        ctx.update({"request": request, "active": "more"})
+        return templates.TemplateResponse("checkers.html", ctx, status_code=400)
+
+    config = {}
+    if habit_type == "interval":
+        if has_period:
+            config["has_period"] = True
+        if has_amount:
+            config["has_amount"] = True
+            config["amount_label"] = amount_label.strip() or "Сумма"
+        if free_subtype:
+            config["free_subtype"] = True
+            config["subtype_label"] = subtype_label.strip() or "Название"
+        elif subtype_options.strip():
+            config["subtype_label"] = subtype_label.strip() or "Тип"
+            config["subtype_options"] = parse_options(subtype_options)
+    elif habit_type in ("expense", "fuel"):
+        exp_cat = db.get_category(user_id, int(expense_category_id)) if expense_category_id else None
+        config["category_slug"] = exp_cat["slug"] if exp_cat else "purchases"
+
     db.add_habit(
         user_id, title, category, habit_type=habit_type,
-        unit=unit.strip() or None, target=parse_number(target),
+        unit=unit.strip() or None, target=parse_number(target), config=config,
     )
     return RedirectResponse("/checkers", status_code=303)
 

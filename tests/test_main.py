@@ -1,4 +1,4 @@
-from bot.main import BOT_COMMANDS, QUICK_NAV_HANDLERS
+from bot.main import BOT_COMMANDS
 
 
 def test_bot_commands_have_unique_names_and_descriptions():
@@ -7,6 +7,8 @@ def test_bot_commands_have_unique_names_and_descriptions():
     assert all(c.description for c in BOT_COMMANDS)
 
 
-def test_quick_nav_handlers_are_callable():
-    assert set(QUICK_NAV_HANDLERS) == {"tasks", "calendar", "habitstats", "expenses", "weightstats", "tips"}
-    assert all(callable(handler) for handler in QUICK_NAV_HANDLERS.values())
+def test_bot_is_minimal_secondary_channel():
+    """The bot only covers panel toggling + weight; everything else (tasks,
+    calendar, expenses, stats, tips) lives in the web interface."""
+    names = {c.command for c in BOT_COMMANDS}
+    assert names == {"panel", "weight", "clear", "cancel", "help"}

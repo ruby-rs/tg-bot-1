@@ -4,14 +4,21 @@
     <div class="group">
         <div class="group-title">{{ category }}</div>
         {% for h in items %}
+            {% set cfg = configs_by_habit.get(h['id'], {}) %}
+
             {% if h['type'] == 'bool' %}
-            <button class="checker {{ STATUS_CLASS[h['status']] }}"
-                    hx-post="/checker/{{ h['id'] }}/toggle"
-                    hx-vals='{"day": "{{ day }}"}'
-                    hx-target="#checkers" hx-swap="outerHTML">
-                <span class="mark">{{ STATUS_LABEL[h['status']] }}</span>
-                <span class="label">{{ h['title'] }}</span>
-            </button>
+                {% set locked = cfg.get('restrict_day') and cfg['restrict_day'] != day_num %}
+                <button class="checker {{ STATUS_CLASS[h['status']] }} {{ 'locked' if locked }}"
+                        {% if not locked %}
+                        hx-post="/checker/{{ h['id'] }}/toggle"
+                        hx-vals='{"day": "{{ day }}"}'
+                        hx-target="#checkers" hx-swap="outerHTML"
+                        {% endif %}>
+                    <span class="mark">{{ STATUS_LABEL[h['status']] }}</span>
+                    <span class="label">{{ h['title'] }}
+                        {% if locked %}<small class="muted">(доступно {{ cfg['restrict_day'] }} числа)</small>{% endif %}
+                    </span>
+                </button>
 
             {% elif h['type'] == 'number' %}
             <form class="checker number-checker {{ 'done' if h['value'] is not none }}"
@@ -24,7 +31,7 @@
                 <button type="submit" class="btn tiny">OK</button>
             </form>
 
-            {% else %}
+            {% elif h['type'] == 'note' %}
             <div class="checker note-checker">
                 <div class="note-head">
                     <span class="label">{{ h['title'] }}</span>
@@ -46,16 +53,113 @@
                     <button type="submit" class="btn tiny">+</button>
                 </form>
             </div>
+
+            {% elif h['type'] == 'interval' %}
+            <div class="checker interval-checker">
+                <div class="note-head">
+                    <span class="label">{{ h['title'] }}</span>
+                    {% set ivs = intervals_by_habit.get(h['id'], []) %}
+                    {% if ivs %}<span class="badge">{{ ivs|length }}</span>{% endif %}
+                </div>
+                {% for iv in ivs %}
+                <div class="note-entry">
+                    <span>
+                        {% if iv['period'] %}{{ iv['period'] }} · {% endif %}
+                        {% if iv['start_time'] %}{{ iv['start_time'] }}–{{ iv['end_time'] or '?' }}{% endif %}
+                        {% if iv['subtype'] %} · {{ iv['subtype'] }}{% endif %}
+                        {% if iv['amount'] %} · {{ '%.0f'|format(iv['amount']) }} ₽{% endif %}
+                    </span>
+                    <form hx-post="/interval/{{ iv['id'] }}/delete" hx-target="#checkers" hx-swap="outerHTML" class="inline">
+                        <input type="hidden" name="day" value="{{ day }}">
+                        <button class="btn tiny danger" type="submit">✕</button>
+                    </form>
+                </div>
+                {% endfor %}
+                <form class="interval-add" hx-post="/checker/{{ h['id'] }}/interval" hx-target="#checkers" hx-swap="outerHTML">
+                    <input type="hidden" name="day" value="{{ day }}">
+                    {% if cfg.get('has_period') %}
+                    <select name="period">
+                        <option value="">Время суток…</option>
+                        {% for p in DAY_PERIODS %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+                    </select>
+                    {% endif %}
+                    <div class="time-row">
+                        <input type="time" name="start_time" placeholder="с">
+                        <span class="muted">–</span>
+                        <input type="time" name="end_time" placeholder="до">
+                    </div>
+                    {% if cfg.get('free_subtype') %}
+                    <input type="text" name="subtype" placeholder="{{ cfg.get('subtype_label', 'Название') }}">
+                    {% elif cfg.get('subtype_options') %}
+                    <select name="subtype">
+                        <option value="">{{ cfg.get('subtype_label', 'Тип') }}…</option>
+                        {% for opt in cfg['subtype_options'] %}<option value="{{ opt }}">{{ opt }}</option>{% endfor %}
+                    </select>
+                    {% endif %}
+                    {% if cfg.get('has_amount') %}
+                    <input type="number" step="any" name="amount" placeholder="{{ cfg.get('amount_label', 'Сумма') }}">
+                    {% endif %}
+                    <button type="submit" class="btn tiny">Добавить</button>
+                </form>
+            </div>
+
+            {% elif h['type'] == 'expense' %}
+            <div class="checker expense-checker">
+                <div class="note-head">
+                    <span class="label">{{ h['title'] }}</span>
+                    {% set exps = expense_entries_by_habit.get(h['id'], []) %}
+                    {% if exps %}<span class="badge">{{ '%.0f'|format(exps|sum(attribute='amount')) }} ₽</span>{% endif %}
+                </div>
+                {% for e in exps %}
+                <div class="note-entry">
+                    <span>{{ e['note'] or '—' }} · {{ '%.0f'|format(e['amount']) }} ₽</span>
+                    <form hx-post="/expense-entry/{{ e['id'] }}/delete" hx-target="#checkers" hx-swap="outerHTML" class="inline">
+                        <input type="hidden" name="day" value="{{ day }}">
+                        <button class="btn tiny danger" type="submit">✕</button>
+                    </form>
+                </div>
+                {% endfor %}
+                <form class="expense-add" hx-post="/checker/{{ h['id'] }}/expense" hx-target="#checkers" hx-swap="outerHTML">
+                    <input type="hidden" name="day" value="{{ day }}">
+                    <input type="text" name="name" placeholder="{{ cfg.get('label', 'Наименование') }}">
+                    <input type="number" step="any" name="amount" placeholder="Цена">
+                    <button type="submit" class="btn tiny">+</button>
+                </form>
+            </div>
+
+            {% elif h['type'] == 'fuel' %}
+            <div class="checker expense-checker">
+                <div class="note-head">
+                    <span class="label">{{ h['title'] }}</span>
+                    {% set exps = expense_entries_by_habit.get(h['id'], []) %}
+                    {% if exps %}<span class="badge">{{ '%.0f'|format(exps|sum(attribute='amount')) }} ₽</span>{% endif %}
+                </div>
+                {% for e in exps %}
+                <div class="note-entry">
+                    <span>{{ e['station'] }} · {{ e['liters'] }} л · {{ '%.0f'|format(e['amount']) }} ₽ · {{ e['payment_method'] or '—' }}</span>
+                    <form hx-post="/expense-entry/{{ e['id'] }}/delete" hx-target="#checkers" hx-swap="outerHTML" class="inline">
+                        <input type="hidden" name="day" value="{{ day }}">
+                        <button class="btn tiny danger" type="submit">✕</button>
+                    </form>
+                </div>
+                {% endfor %}
+                <form class="fuel-add" hx-post="/checker/{{ h['id'] }}/fuel" hx-target="#checkers" hx-swap="outerHTML">
+                    <input type="hidden" name="day" value="{{ day }}">
+                    <select name="station">
+                        <option value="">Заправка…</option>
+                        {% for s in db_fuel_stations %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+                    </select>
+                    <input type="number" step="any" name="liters" placeholder="Литры">
+                    <input type="number" step="any" name="amount" placeholder="Сумма, ₽">
+                    <select name="payment_method">
+                        <option value="">Оплата…</option>
+                        {% for p in db_payment_methods %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+                    </select>
+                    <button type="submit" class="btn tiny">+</button>
+                </form>
+            </div>
             {% endif %}
         {% endfor %}
     </div>
     {% endfor %}
-    {% if fuel %}
-    <div class="group">
-        <div class="group-title">⛽️ Заправки</div>
-        {% for e in fuel %}
-        <div class="fuel-row">{{ e['station'] }} · {{ e['liters'] }} л · {{ '%.0f'|format(e['amount']) }} ₽ · {{ e['payment_method'] }}</div>
-        {% endfor %}
-    </div>
-    {% endif %}
 </div>

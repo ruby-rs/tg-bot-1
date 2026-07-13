@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timezone
 from contextlib import contextmanager
@@ -14,24 +15,43 @@ DEFAULT_CATEGORIES = [
     ("mortgage", "Ипотека", "🏦"),
     ("relationship", "Отношения", "❤️"),
     ("vacation", "Отпуск", "🏖"),
+    ("purchases", "Покупки", "🛒"),
+    ("gifts", "Подарки", "🎁"),
 ]
 
-# (slug, title, category)
+WORKOUT_TYPES = [
+    "Разминка", "Силовая", "Уличная (турники)", "Бег", "Велосипед",
+    "Плавание", "Йога", "Кроссфит", "Бокс/единоборства", "Футбол", "Растяжка",
+]
+SIDE_JOB_TYPES = ["Водитель", "Стройка", "Сетевой инженер"]
+DAY_PERIODS = ["Утро", "День", "Вечер", "Ночь"]
+
+# (slug, title, category, type, config-dict)
 DEFAULT_HABITS = [
-    ("water", "Вода 2+ литра", "Здоровье"),
-    ("flat_work", "Работы на квартире", "Стройка"),
-    ("house_work", "Работы на доме", "Стройка"),
-    ("work_shift", "Рабочая смена", "Работа"),
-    ("productive_day", "Продуктивный день", "Работа"),
-    ("mortgage_paid", "Ипотека внесена", "Финансы"),
-    ("budget_ok", "В рамках бюджета", "Финансы"),
-    ("gf_meeting", "Встречи с девушкой", "Отношения и жизнь"),
-    ("events", "Мероприятия", "Отношения и жизнь"),
-    ("car_service", "Обслуживание", "Авто"),
+    ("water", "Вода", "Здоровье", "number", {"unit": "л", "target": 2}),
+    ("workout", "Тренировка", "Здоровье", "interval",
+     {"has_period": True, "subtype_label": "Вид тренировки", "subtype_options": WORKOUT_TYPES}),
+    ("flat_work", "Работы на квартире", "Стройка", "interval", {"aggregate": "hours"}),
+    ("house_work", "Работы на доме", "Стройка", "interval", {"aggregate": "hours"}),
+    ("work_shift", "Смена", "Работа", "interval",
+     {"aggregate": "hours", "presets": ["09:00-18:00"]}),
+    ("side_job", "Подработка", "Работа", "interval",
+     {"has_amount": True, "amount_label": "Заработок, ₽",
+      "subtype_label": "Вид подработки", "subtype_options": SIDE_JOB_TYPES}),
+    ("mortgage_paid", "Ипотека внесена", "Финансы", "bool", {"restrict_day": 16}),
+    ("purchases", "Покупки", "Финансы", "expense", {"category_slug": "purchases"}),
+    ("gift", "Подарок", "Финансы", "expense", {"category_slug": "gifts"}),
+    ("gf_meeting", "Встреча с девушкой", "Отношения и жизнь", "interval", {}),
+    ("events", "Мероприятие", "Отношения и жизнь", "interval",
+     {"free_subtype": True, "subtype_label": "Название"}),
+    ("fuel", "Заправка", "Авто", "fuel", {"category_slug": "car"}),
+    ("car_service", "Обслуживание", "Авто", "expense",
+     {"category_slug": "car", "label": "Работы"}),
 ]
 
 FUEL_STATIONS = ["Лукойл", "Роснефть", "Нефтьмагистраль", "Тбойл"]
 PAYMENT_METHODS = ["Карта", "Деньги"]
+HABIT_TYPES = ("bool", "number", "note", "interval", "expense", "fuel")
 
 
 def init_db(path: str = None):
@@ -103,6 +123,7 @@ def init_db(path: str = None):
                 type TEXT NOT NULL DEFAULT 'bool',
                 unit TEXT,
                 target REAL,
+                config TEXT,
                 UNIQUE(user_id, slug),
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
@@ -122,6 +143,19 @@ def init_db(path: str = None):
                 habit_id INTEGER NOT NULL,
                 log_date TEXT NOT NULL,
                 text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(habit_id) REFERENCES habits(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS habit_intervals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                habit_id INTEGER NOT NULL,
+                log_date TEXT NOT NULL,
+                start_time TEXT,
+                end_time TEXT,
+                period TEXT,
+                subtype TEXT,
+                amount REAL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(habit_id) REFERENCES habits(id)
             );
@@ -163,10 +197,84 @@ def _migrate(conn):
         conn.execute("ALTER TABLE habits ADD COLUMN unit TEXT")
     if "target" not in habit_columns:
         conn.execute("ALTER TABLE habits ADD COLUMN target REAL")
+    if "config" not in habit_columns:
+        conn.execute("ALTER TABLE habits ADD COLUMN config TEXT")
 
     log_columns = {row["name"] for row in conn.execute("PRAGMA table_info(habit_logs)").fetchall()}
     if "value" not in log_columns:
         conn.execute("ALTER TABLE habit_logs ADD COLUMN value REAL")
+
+    _migrate_habit_definitions(conn)
+
+
+# Slugs replaced by newer built-in checkers (see DEFAULT_HABITS below).
+_REMOVED_HABIT_SLUGS = ("productive_day", "budget_ok")
+
+
+def _migrate_habit_definitions(conn):
+    """Brings already-registered users' built-in checkers up to the current
+    DEFAULT_HABITS/DEFAULT_CATEGORIES spec (new types, configs, categories).
+    Idempotent: safe to run on every startup. Only touches built-in slugs —
+    a user's own custom checkers (added via the "Чекеры" page) are untouched.
+    """
+    users = conn.execute("SELECT id FROM users").fetchall()
+    if not users:
+        return
+
+    existing_cat_slugs_by_user = {}
+    for row in conn.execute("SELECT user_id, slug FROM categories").fetchall():
+        existing_cat_slugs_by_user.setdefault(row["user_id"], set()).add(row["slug"])
+
+    for user in users:
+        user_id = user["id"]
+        cat_slugs = existing_cat_slugs_by_user.get(user_id, set())
+        max_cat_order = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS m FROM categories WHERE user_id = ?", (user_id,)
+        ).fetchone()["m"]
+        for slug, title, emoji in DEFAULT_CATEGORIES:
+            if slug not in cat_slugs:
+                max_cat_order += 1
+                conn.execute(
+                    "INSERT INTO categories (user_id, slug, title, emoji, sort_order) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, slug, title, emoji, max_cat_order),
+                )
+
+        for removed_slug in _REMOVED_HABIT_SLUGS:
+            removed = conn.execute(
+                "SELECT id FROM habits WHERE user_id = ? AND slug = ?", (user_id, removed_slug)
+            ).fetchone()
+            if removed is None:
+                continue
+            conn.execute("DELETE FROM habit_entries WHERE habit_id = ?", (removed["id"],))
+            conn.execute("DELETE FROM habit_intervals WHERE habit_id = ?", (removed["id"],))
+            conn.execute("DELETE FROM habit_logs WHERE habit_id = ?", (removed["id"],))
+            conn.execute("DELETE FROM habits WHERE id = ?", (removed["id"],))
+
+        habit_slugs = {
+            row["slug"] for row in
+            conn.execute("SELECT slug FROM habits WHERE user_id = ?", (user_id,)).fetchall()
+        }
+        max_habit_order = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) AS m FROM habits WHERE user_id = ?", (user_id,)
+        ).fetchone()["m"]
+        for slug, title, category, habit_type, config in DEFAULT_HABITS:
+            unit = config.get("unit")
+            target = config.get("target")
+            config_json = json.dumps(config) if config else None
+            if slug in habit_slugs:
+                conn.execute(
+                    "UPDATE habits SET type = ?, unit = ?, target = ?, config = ? WHERE user_id = ? AND slug = ?",
+                    (habit_type, unit, target, config_json, user_id, slug),
+                )
+            else:
+                max_habit_order += 1
+                conn.execute(
+                    """
+                    INSERT INTO habits (user_id, slug, title, category, sort_order, type, unit, target, config)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, slug, title, category, max_habit_order, habit_type, unit, target, config_json),
+                )
 
 
 @contextmanager
@@ -205,10 +313,17 @@ def get_or_create_user(tg_id: int, name: str) -> int:
                 "INSERT INTO categories (user_id, slug, title, emoji, sort_order) VALUES (?, ?, ?, ?, ?)",
                 (user_id, slug, title, emoji, order),
             )
-        for order, (slug, title, category) in enumerate(DEFAULT_HABITS):
+        for order, (slug, title, category, habit_type, config) in enumerate(DEFAULT_HABITS):
             conn.execute(
-                "INSERT INTO habits (user_id, slug, title, category, sort_order) VALUES (?, ?, ?, ?, ?)",
-                (user_id, slug, title, category, order),
+                """
+                INSERT INTO habits (user_id, slug, title, category, sort_order, type, unit, target, config)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id, slug, title, category, order, habit_type,
+                    config.get("unit"), config.get("target"),
+                    json.dumps(config) if config else None,
+                ),
             )
         return user_id
 
@@ -327,7 +442,7 @@ def get_expenses_for_month(user_id: int, year_month: str):
     with get_conn() as conn:
         return conn.execute(
             """
-            SELECT e.*, c.title AS category_title, c.emoji AS category_emoji
+            SELECT e.*, c.title AS category_title, c.emoji AS category_emoji, c.slug AS category_slug
             FROM expenses e
             JOIN categories c ON c.id = e.category_id
             WHERE e.user_id = ? AND strftime('%Y-%m', e.logged_at) = ?
@@ -351,7 +466,7 @@ def get_expenses_for_date(user_id: int, log_date: str):
     with get_conn() as conn:
         return conn.execute(
             """
-            SELECT e.*, c.title AS category_title, c.emoji AS category_emoji
+            SELECT e.*, c.title AS category_title, c.emoji AS category_emoji, c.slug AS category_slug
             FROM expenses e
             JOIN categories c ON c.id = e.category_id
             WHERE e.user_id = ? AND date(e.logged_at) = ?
@@ -359,9 +474,6 @@ def get_expenses_for_date(user_id: int, log_date: str):
             """,
             (user_id, log_date),
         ).fetchall()
-
-
-HABIT_TYPES = ("bool", "number", "note")
 
 
 def _slugify(title: str, existing_slugs) -> str:
@@ -390,7 +502,7 @@ def get_habit(user_id: int, habit_id: int):
 
 def add_habit(
     user_id: int, title: str, category: str, habit_type: str = "bool",
-    unit: str = None, target: float = None,
+    unit: str = None, target: float = None, config: dict = None,
 ) -> int:
     if habit_type not in HABIT_TYPES:
         habit_type = "bool"
@@ -406,17 +518,20 @@ def add_habit(
         ).fetchone()["m"]
         cur = conn.execute(
             """
-            INSERT INTO habits (user_id, slug, title, category, sort_order, type, unit, target)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO habits (user_id, slug, title, category, sort_order, type, unit, target, config)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, slug, title, category, max_order + 1, habit_type, unit, target),
+            (
+                user_id, slug, title, category, max_order + 1, habit_type, unit, target,
+                json.dumps(config) if config else None,
+            ),
         )
         return cur.lastrowid
 
 
 def update_habit(
     user_id: int, habit_id: int, title: str = None, category: str = None,
-    unit: str = None, target: float = None,
+    unit: str = None, target: float = None, config: dict = None,
 ):
     fields, params = [], []
     if title is not None:
@@ -431,6 +546,9 @@ def update_habit(
     if target is not None:
         fields.append("target = ?")
         params.append(target)
+    if config is not None:
+        fields.append("config = ?")
+        params.append(json.dumps(config) if config else None)
     if not fields:
         return
     params.extend([user_id, habit_id])
@@ -446,6 +564,7 @@ def delete_habit(user_id: int, habit_id: int):
         if habit is None:
             return
         conn.execute("DELETE FROM habit_entries WHERE habit_id = ?", (habit_id,))
+        conn.execute("DELETE FROM habit_intervals WHERE habit_id = ?", (habit_id,))
         conn.execute("DELETE FROM habit_logs WHERE habit_id = ?", (habit_id,))
         conn.execute("DELETE FROM habits WHERE id = ?", (habit_id,))
 
@@ -454,7 +573,7 @@ def get_habit_logs_for_date(user_id: int, log_date: str):
     with get_conn() as conn:
         return conn.execute(
             """
-            SELECT h.id, h.title, h.category, h.sort_order, h.type, h.unit, h.target,
+            SELECT h.id, h.title, h.category, h.sort_order, h.type, h.unit, h.target, h.config,
                    hl.status, hl.value
             FROM habits h
             LEFT JOIN habit_logs hl ON hl.habit_id = h.id AND hl.log_date = ?
@@ -550,6 +669,79 @@ def get_habit_logs_for_month(user_id: int, year_month: str):
         return {(row["habit_id"], row["log_date"]): row for row in rows}
 
 
+def habit_config(habit) -> dict:
+    """Parses a habit row's ``config`` JSON column into a dict (empty dict if unset/invalid)."""
+    raw = habit["config"] if habit is not None else None
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+
+
+def get_category_by_slug(user_id: int, slug: str):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM categories WHERE user_id = ? AND slug = ?", (user_id, slug)
+        ).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Interval-type checkers (time ranges, optionally with subtype/amount) —
+# used for construction work, shifts, side jobs, workouts, meetings, events.
+# ---------------------------------------------------------------------------
+
+def add_habit_interval(
+    habit_id: int, log_date: str, start_time: str = None, end_time: str = None,
+    period: str = None, subtype: str = None, amount: float = None,
+) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO habit_intervals (habit_id, log_date, start_time, end_time, period, subtype, amount, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (habit_id, log_date, start_time, end_time, period, subtype, amount, now()),
+        )
+        return cur.lastrowid
+
+
+def get_habit_intervals_for_date(habit_id: int, log_date: str):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM habit_intervals WHERE habit_id = ? AND log_date = ? ORDER BY created_at",
+            (habit_id, log_date),
+        ).fetchall()
+
+
+def delete_habit_interval(user_id: int, interval_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            DELETE FROM habit_intervals WHERE id = ? AND habit_id IN (
+                SELECT id FROM habits WHERE user_id = ?
+            )
+            """,
+            (interval_id, user_id),
+        )
+
+
+def get_habit_intervals_for_month(user_id: int, year_month: str):
+    """Returns all interval rows for the month, for duration/earnings aggregation in Python."""
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT hi.*
+            FROM habit_intervals hi
+            JOIN habits h ON h.id = hi.habit_id
+            WHERE h.user_id = ? AND strftime('%Y-%m', hi.log_date) = ?
+            ORDER BY hi.log_date
+            """,
+            (user_id, year_month),
+        ).fetchall()
+
+
 def toggle_habit_log(habit_id: int, log_date: str) -> str:
     """Cycles a habit's status for a given day: none -> done -> skip -> none."""
     with get_conn() as conn:
@@ -582,7 +774,7 @@ def get_habit_month_stats(user_id: int, year_month: str):
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT h.id, h.title, h.category, h.sort_order, h.type, h.unit, h.target,
+            SELECT h.id, h.title, h.category, h.sort_order, h.type, h.unit, h.target, h.config,
                    SUM(CASE WHEN hl.status = 'done' THEN 1 ELSE 0 END) AS done_count,
                    SUM(hl.value) AS value_sum
             FROM habits h

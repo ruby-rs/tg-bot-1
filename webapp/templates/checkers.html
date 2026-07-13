@@ -3,12 +3,13 @@
 {% block heading %}Чекеры{% endblock %}
 {% block header_extra %}<a class="topbar-link" href="/more">Ещё</a>{% endblock %}
 {% block content %}
+<p class="muted small">Конструктор: добавляй свои пункты — да/нет, число, заметка, интервал времени (с подтипом и суммой) или список расходов, привязанный к категории.</p>
 <form class="card checker-form" method="post" action="/checkers">
     <label>Название
-        <input type="text" name="title" placeholder="напр. Заправка" required>
+        <input type="text" name="title" placeholder="напр. Растяжка" required>
     </label>
     <label>Категория
-        <input type="text" name="category" list="cat-options" placeholder="напр. Авто" required>
+        <input type="text" name="category" list="cat-options" placeholder="напр. Здоровье" required>
         <datalist id="cat-options">
             {% for c in categories %}<option value="{{ c }}">{% endfor %}
         </datalist>
@@ -17,13 +18,37 @@
         <select name="habit_type" id="type-select">
             <option value="bool">Да/нет</option>
             <option value="number">Число</option>
-            <option value="note">Заметка</option>
+            <option value="note">Заметка (список записей за день)</option>
+            <option value="interval">Интервал времени (с–до)</option>
+            <option value="expense">Список расходов (наименование + цена)</option>
+            <option value="fuel">Заправка (АЗС, литры, оплата)</option>
         </select>
     </label>
-    <div id="number-fields" class="number-fields" hidden>
+
+    <div id="number-fields" class="type-fields" hidden>
         <label>Единица <input type="text" name="unit" placeholder="г, л, ч…"></label>
         <label>Цель <input type="number" step="any" name="target" placeholder="необязательно"></label>
     </div>
+
+    <div id="interval-fields" class="type-fields" hidden>
+        <label class="checkbox-label"><input type="checkbox" name="has_period" value="1"> Показывать время суток (утро/день/вечер/ночь)</label>
+        <label class="checkbox-label"><input type="checkbox" name="has_amount" id="has-amount" value="1"> Показывать сумму</label>
+        <label id="amount-label-field" hidden>Подпись суммы <input type="text" name="amount_label" placeholder="напр. Заработок, ₽"></label>
+        <label class="checkbox-label"><input type="checkbox" name="free_subtype" id="free-subtype" value="1"> Подтип — свободный текст (напр. название мероприятия)</label>
+        <label id="subtype-label-field">Подпись подтипа <input type="text" name="subtype_label" placeholder="напр. Вид тренировки"></label>
+        <label id="subtype-options-field">Варианты подтипа (по одному на строку или через запятую)
+            <textarea name="subtype_options" rows="3" placeholder="Силовая&#10;Бег&#10;Велосипед"></textarea>
+        </label>
+    </div>
+
+    <div id="expense-fields" class="type-fields" hidden>
+        <label>Категория расходов
+            <select name="expense_category_id">
+                {% for c in expense_categories %}<option value="{{ c['id'] }}">{{ c['emoji'] }} {{ c['title'] }}</option>{% endfor %}
+            </select>
+        </label>
+    </div>
+
     <button type="submit" class="btn primary">Добавить чекер</button>
 </form>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
@@ -57,9 +82,28 @@
 <script>
 (function () {
     var sel = document.getElementById('type-select');
-    var fields = document.getElementById('number-fields');
-    function sync() { fields.hidden = sel.value !== 'number'; }
+    var groups = {
+        number: document.getElementById('number-fields'),
+        interval: document.getElementById('interval-fields'),
+        expense: document.getElementById('expense-fields'),
+        fuel: document.getElementById('expense-fields'),
+    };
+    var hasAmount = document.getElementById('has-amount');
+    var amountLabelField = document.getElementById('amount-label-field');
+    var freeSubtype = document.getElementById('free-subtype');
+    var subtypeLabelField = document.getElementById('subtype-label-field');
+    var subtypeOptionsField = document.getElementById('subtype-options-field');
+
+    function sync() {
+        Object.keys(groups).forEach(function (key) {
+            if (groups[key]) groups[key].hidden = sel.value !== key;
+        });
+        amountLabelField.hidden = !hasAmount.checked;
+        subtypeOptionsField.hidden = freeSubtype.checked;
+    }
     sel.addEventListener('change', sync);
+    hasAmount.addEventListener('change', sync);
+    freeSubtype.addEventListener('change', sync);
     sync();
 })();
 </script>

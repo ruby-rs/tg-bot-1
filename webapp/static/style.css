@@ -277,10 +277,14 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 /* Month grid (spreadsheet-style overview) */
 .section-title { font-size: 1rem; margin: 24px 0 10px; }
 .grid-scroll { overflow-x: auto; margin-bottom: 20px; border: 1px solid var(--border); border-radius: var(--radius); }
-.grid-table { border-collapse: collapse; width: 100%; font-size: .8rem; white-space: nowrap; }
+/* border-collapse: separate (not collapse) — Safari renders sticky cells
+   incorrectly (backgrounds bleeding into neighbouring rows/columns while
+   scrolling) when combined with border-collapse: collapse. */
+.grid-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: .8rem; white-space: nowrap; }
 .grid-table th, .grid-table td {
     padding: 6px 8px;
     text-align: center;
+    background: var(--bg);
     border-bottom: 1px solid var(--border);
     border-right: 1px solid var(--border);
 }

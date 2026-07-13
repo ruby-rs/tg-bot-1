@@ -55,7 +55,7 @@ templates.env.globals.update(
     MONTHS_RU=MONTHS_RU, STATUS_CLASS=STATUS_CLASS, STATUS_LABEL=STATUS_LABEL,
     HABIT_TYPE_LABEL=HABIT_TYPE_LABEL, WORKOUT_TYPES=db.WORKOUT_TYPES,
     SIDE_JOB_TYPES=db.SIDE_JOB_TYPES, DAY_PERIODS=db.DAY_PERIODS,
-    db_fuel_stations=db.FUEL_STATIONS, db_payment_methods=db.PAYMENT_METHODS,
+    db_payment_methods=db.PAYMENT_METHODS,
 )
 
 
@@ -227,6 +227,7 @@ def build_day_context(user_id: int, day: str):
         "intervals_by_habit": intervals_by_habit,
         "expense_entries_by_habit": expense_entries_by_habit,
         "configs_by_habit": configs_by_habit,
+        "fuel_stations": db.get_known_fuel_stations(user_id),
         "done": done,
         "total": total_bool,
         "day_num": day_num,
@@ -570,7 +571,7 @@ def expenses_page(request: Request, ym: str = None, category_id: str = None, _=D
             "ym": ym, "entries": entries, "total": total, "breakdown": breakdown,
             "selected_category": int(category_id) if category_id else None,
             "categories": db.get_categories(user_id),
-            "stations": db.FUEL_STATIONS, "payments": db.PAYMENT_METHODS,
+            "stations": db.get_known_fuel_stations(user_id), "payments": db.PAYMENT_METHODS,
             "prev": shift_month(ym, -1), "next": shift_month(ym, 1),
             "today": today_str(), "error": None,
         },
@@ -614,7 +615,7 @@ def _expenses_error(request, user_id, message):
             "request": request, "active": "expenses", "ym": ym, "entries": entries,
             "total": sum(e["amount"] for e in entries), "breakdown": [], "selected_category": None,
             "categories": db.get_categories(user_id),
-            "stations": db.FUEL_STATIONS, "payments": db.PAYMENT_METHODS,
+            "stations": db.get_known_fuel_stations(user_id), "payments": db.PAYMENT_METHODS,
             "prev": shift_month(ym, -1), "next": shift_month(ym, 1),
             "today": today_str(), "error": message,
         },

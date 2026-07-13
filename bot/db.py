@@ -452,6 +452,24 @@ def get_expenses_for_month(user_id: int, year_month: str):
         ).fetchall()
 
 
+def get_known_fuel_stations(user_id: int):
+    """Preset stations plus any custom names the user has already typed in,
+    most-recently-used first, so a one-off custom name gets suggested again."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT station, MAX(logged_at) AS last_used
+            FROM expenses
+            WHERE user_id = ? AND station IS NOT NULL AND station != ''
+            GROUP BY station
+            ORDER BY last_used DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    used = [row["station"] for row in rows]
+    return used + [s for s in FUEL_STATIONS if s not in used]
+
+
 def delete_expense(user_id: int, expense_id: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM expenses WHERE user_id = ? AND id = ?", (user_id, expense_id))

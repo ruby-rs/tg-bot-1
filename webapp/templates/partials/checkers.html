@@ -145,10 +145,10 @@
                 {% endfor %}
                 <form class="fuel-add" hx-post="/checker/{{ h['id'] }}/fuel" hx-target="#checkers" hx-swap="outerHTML">
                     <input type="hidden" name="day" value="{{ day }}">
-                    <select name="station">
-                        <option value="">Заправка…</option>
-                        {% for s in db_fuel_stations %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
-                    </select>
+                    <input list="fuel-stations-{{ h['id'] }}" name="station" placeholder="Заправка…">
+                    <datalist id="fuel-stations-{{ h['id'] }}">
+                        {% for s in fuel_stations %}<option value="{{ s }}">{% endfor %}
+                    </datalist>
                     <input type="number" step="any" name="liters" placeholder="Литры">
                     <input type="number" step="any" name="amount" placeholder="Сумма, ₽">
                     <select name="payment_method">

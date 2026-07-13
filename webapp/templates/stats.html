@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Статистика · Трекер{% endblock %}
 {% block heading %}Статистика{% endblock %}
+{% block header_extra %}<a class="topbar-link" href="/more">Ещё</a>{% endblock %}
 {% block content %}
 <div class="monthnav">
     <a class="btn ghost" href="/stats?ym={{ prev }}">‹</a>
@@ -14,8 +15,16 @@
     {% for r in items %}
     <div class="stat-row">
         <span class="stat-label">{{ r['title'] }}</span>
-        <div class="bar"><div class="bar-fill" style="width: {{ (100 * r['done'] / r['total'])|round }}%"></div></div>
-        <b>{{ r['done'] }}</b>
+        {% if r['type'] == 'bool' %}
+        <div class="bar"><div class="bar-fill" style="width: {{ (100 * (r['done_count'] or 0) / days_in_month)|round }}%"></div></div>
+        <b>{{ r['done_count'] or 0 }}/{{ days_in_month }}</b>
+        {% elif r['type'] == 'number' %}
+        <div class="bar"></div>
+        <b>{{ '%.1f'|format(r['value_sum'] or 0) }}{{ r['unit'] or '' }}</b>
+        {% else %}
+        <div class="bar"></div>
+        <b>{{ r['note_count'] or 0 }} зап.</b>
+        {% endif %}
     </div>
     {% endfor %}
 </div>

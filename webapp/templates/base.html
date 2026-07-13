@@ -9,27 +9,42 @@
     <script src="/static/htmx.min.js" defer></script>
 </head>
 <body>
-<div class="app">
-    {% block header %}
-    <header class="topbar">
-        <span class="topbar-title">{% block heading %}Трекер{% endblock %}</span>
-        {% block header_extra %}{% endblock %}
-    </header>
-    {% endblock %}
-
-    <main class="content">
-        {% block content %}{% endblock %}
-    </main>
-
+<div class="shell">
     {% if active %}
-    <nav class="bottomnav">
+    <nav class="sidenav">
+        <div class="sidenav-brand">📊 Трекер</div>
         <a href="/" class="{{ 'on' if active == 'panel' }}"><span>📋</span>Сегодня</a>
         <a href="/calendar" class="{{ 'on' if active == 'calendar' }}"><span>📅</span>Календарь</a>
-        <a href="/weight" class="{{ 'on' if active == 'weight' }}"><span>⚖️</span>Вес</a>
         <a href="/expenses" class="{{ 'on' if active == 'expenses' }}"><span>💸</span>Расходы</a>
-        <a href="/stats" class="{{ 'on' if active == 'stats' }}"><span>📊</span>Статы</a>
+        <a href="/weight" class="{{ 'on' if active == 'more' and request.url.path == '/weight' }}"><span>⚖️</span>Вес</a>
+        <a href="/stats" class="{{ 'on' if active == 'more' and request.url.path == '/stats' }}"><span>📊</span>Статистика</a>
+        <a href="/checkers" class="{{ 'on' if active == 'more' and request.url.path == '/checkers' }}"><span>🧩</span>Чекеры</a>
+        <a href="/events" class="{{ 'on' if active == 'more' and request.url.path == '/events' }}"><span>💞</span>События</a>
+        <a href="/logout" class="sidenav-logout"><span>🚪</span>Выйти</a>
     </nav>
     {% endif %}
+
+    <div class="app">
+        {% block header %}
+        <header class="topbar">
+            <span class="topbar-title">{% block heading %}Трекер{% endblock %}</span>
+            {% block header_extra %}{% endblock %}
+        </header>
+        {% endblock %}
+
+        <main class="content">
+            {% block content %}{% endblock %}
+        </main>
+
+        {% if active %}
+        <nav class="bottomnav">
+            <a href="/" class="{{ 'on' if active == 'panel' }}"><span>📋</span>Сегодня</a>
+            <a href="/calendar" class="{{ 'on' if active == 'calendar' }}"><span>📅</span>Календарь</a>
+            <a href="/expenses" class="{{ 'on' if active == 'expenses' }}"><span>💸</span>Расходы</a>
+            <a href="/more" class="{{ 'on' if active == 'more' }}"><span>⋯</span>Ещё</a>
+        </nav>
+        {% endif %}
+    </div>
 </div>
 </body>
 </html>

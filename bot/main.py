@@ -155,7 +155,9 @@ def clear_flags(context):
 
 def build_panel_view(user_id: int, first_name: str):
     today = db.today()
-    rows = db.get_habit_logs_for_date(user_id, today)
+    # The bot only supports the simple done/skip/none cycle; number- and
+    # note-type checkers (created from the web UI) are edited there instead.
+    rows = [r for r in db.get_habit_logs_for_date(user_id, today) if r["type"] == "bool"]
     done = sum(1 for r in rows if r["status"] == "done")
     total = len(rows)
 
@@ -232,7 +234,8 @@ async def panel_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = db.get_or_create_user(user.id, user.full_name)
     habit_id = int(query.data.split(":")[1])
-    if db.get_habit(user_id, habit_id) is None:
+    habit = db.get_habit(user_id, habit_id)
+    if habit is None or habit["type"] != "bool":
         await query.answer("Пункт не найден")
         return
     new_status = db.toggle_habit_log(habit_id, db.today())
@@ -542,7 +545,8 @@ def build_calendar_view(user_id: int, year_month: str):
 
 
 def build_day_view(user_id: int, log_date: str):
-    rows = db.get_habit_logs_for_date(user_id, log_date)
+    # Same restriction as build_panel_view: only bool-type checkers here.
+    rows = [r for r in db.get_habit_logs_for_date(user_id, log_date) if r["type"] == "bool"]
     lines = [f"📅 *{escape_md(log_date)}*", ""]
     buttons = []
     for category, items in _group_by_category(rows).items():
@@ -615,7 +619,8 @@ async def habit_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = db.get_or_create_user(user.id, user.full_name)
     _, log_date, habit_id_str = query.data.split(":")
     habit_id = int(habit_id_str)
-    if db.get_habit(user_id, habit_id) is None:
+    habit = db.get_habit(user_id, habit_id)
+    if habit is None or habit["type"] != "bool":
         await query.answer("Пункт не найден")
         return
     new_status = db.toggle_habit_log(habit_id, log_date)
@@ -686,7 +691,7 @@ async def habitstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
     year_month = db.today()[:7]
-    rows = db.get_habit_month_stats(user_id, year_month)
+    rows = [r for r in db.get_habit_month_stats(user_id, year_month) if r["type"] == "bool"]
     lines = [f"📊 *Статистика за {escape_md(year_month)}*", ""]
     for category, items in _group_by_category(rows).items():
         rows_table = [(h["title"], str(h["done_count"] or 0)) for h in items]

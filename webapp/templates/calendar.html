@@ -29,5 +29,38 @@
     </div>
     {% endfor %}
 </div>
-<p class="muted center">Цифра на дне — сколько пунктов отмечено ✅</p>
+<p class="muted center">Тапни по дню, чтобы отметить пункты и заправки.</p>
+
+<h2 class="section-title">📋 Таблица месяца</h2>
+<div class="grid-scroll">
+    <table class="grid-table">
+        <thead>
+            <tr>
+                <th class="grid-label-col">Чекер</th>
+                {% for dh in day_headers %}
+                <th class="{{ 'today' if dh.is_today }}"><a href="/day/{{ dh.date }}">{{ dh.num }}<br><small>{{ dh.weekday }}</small></a></th>
+                {% endfor %}
+                <th class="grid-total-col">Итого</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for category, items in grid_groups %}
+            <tr class="grid-category-row">
+                <td colspan="{{ day_headers|length + 2 }}">{{ category }}</td>
+            </tr>
+            {% for row in items %}
+            <tr>
+                <td class="grid-label-col">
+                    <a href="/checkers">{{ row.habit['title'] }}</a>
+                </td>
+                {% for cell in row.cells %}
+                <td class="grid-cell {{ 'on' if cell.on }} {{ 'skip' if cell.skip }}">{{ cell.text }}</td>
+                {% endfor %}
+                <td class="grid-total-col">{{ row.total }}</td>
+            </tr>
+            {% endfor %}
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% endblock %}

@@ -21,12 +21,25 @@ html, body {
     font-size: 16px;
 }
 
+/* Overall shell: sidebar (desktop) + main app column */
+.shell {
+    display: flex;
+    min-height: 100vh;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
 .app {
+    flex: 1;
+    min-width: 0;
     max-width: 640px;
     margin: 0 auto;
     min-height: 100vh;
     padding-bottom: calc(72px + env(safe-area-inset-bottom));
 }
+
+/* Sidebar nav — hidden on mobile, shown on wide screens */
+.sidenav { display: none; }
 
 /* Top bar */
 .topbar {
@@ -60,7 +73,25 @@ html, body {
 
 .counter { margin: 0 0 14px; }
 .muted { color: var(--muted); }
+.muted.small { font-size: .8rem; margin: 0 0 10px; }
 .center { text-align: center; }
+
+/* Events strip on panel */
+.events-strip { display: flex; gap: 10px; overflow-x: auto; margin-bottom: 18px; padding-bottom: 2px; }
+.event-chip {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 8px 14px;
+    font-size: .85rem;
+    white-space: nowrap;
+}
+.event-emoji { font-size: 1.1rem; }
+.event-days { color: var(--accent); font-weight: 600; }
 
 /* Checker groups */
 .group { margin-bottom: 20px; }
@@ -94,6 +125,25 @@ html, body {
 .checker.skip { border-left-color: var(--skip); background: #251717; }
 .checker:active { transform: scale(.995); }
 
+/* Number-type checker */
+.number-checker { flex-wrap: wrap; cursor: default; }
+.number-checker .number-input { width: 90px; flex: 0 0 auto; padding: 8px 10px; }
+.number-checker .btn { flex: 0 0 auto; }
+
+/* Note-type checker */
+.note-checker { flex-direction: column; align-items: stretch; cursor: default; gap: 8px; }
+.note-head { display: flex; align-items: center; gap: 8px; }
+.note-head .badge {
+    background: var(--accent); color: #fff; border-radius: 999px;
+    font-size: .7rem; padding: 1px 8px;
+}
+.note-entry {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: var(--card2); border-radius: 8px; padding: 8px 10px; font-size: .9rem;
+}
+.note-add { display: flex; gap: 8px; }
+.note-add input { padding: 9px 10px; }
+
 .fuel-row { padding: 8px 6px; color: var(--muted); border-bottom: 1px solid var(--border); }
 
 /* Cards & forms */
@@ -106,9 +156,13 @@ html, body {
 }
 .row-form { display: flex; gap: 10px; }
 .row-form input { flex: 1; }
-.expense-form { display: flex; flex-direction: column; gap: 12px; }
-.expense-form label, .fuel-fields label { display: flex; flex-direction: column; gap: 6px; font-size: .85rem; color: var(--muted); }
-.fuel-fields { display: flex; flex-direction: column; gap: 12px; }
+.expense-form, .checker-form, .event-form { display: flex; flex-direction: column; gap: 12px; }
+.expense-form label, .fuel-fields label, .checker-form label, .event-form label {
+    display: flex; flex-direction: column; gap: 6px; font-size: .85rem; color: var(--muted);
+}
+.fuel-fields, .number-fields { display: flex; flex-direction: column; gap: 12px; }
+.checkbox-label { flex-direction: row !important; align-items: center; gap: 8px !important; }
+.checkbox-label input { width: auto; }
 
 input, select {
     width: 100%;
@@ -153,7 +207,7 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
     margin-bottom: 8px;
 }
 .list-row b { margin-left: auto; }
-.expense-row .expense-main { display: flex; flex-direction: column; gap: 2px; }
+.expense-row .expense-main, .event-row .expense-main { display: flex; flex-direction: column; gap: 2px; }
 .expense-row b { margin-left: auto; white-space: nowrap; }
 
 /* Month nav */
@@ -195,20 +249,79 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
     color: #7fd79a;
 }
 
+/* Month grid (spreadsheet-style overview) */
+.section-title { font-size: 1rem; margin: 24px 0 10px; }
+.grid-scroll { overflow-x: auto; margin-bottom: 20px; border: 1px solid var(--border); border-radius: var(--radius); }
+.grid-table { border-collapse: collapse; width: 100%; font-size: .8rem; white-space: nowrap; }
+.grid-table th, .grid-table td {
+    padding: 6px 8px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+}
+.grid-table th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--card); z-index: 1; }
+.grid-table th a { color: inherit; text-decoration: none; }
+.grid-table th.today { color: var(--accent); }
+.grid-label-col {
+    text-align: left !important;
+    min-width: 160px;
+    position: sticky;
+    left: 0;
+    background: var(--bg);
+    z-index: 2;
+}
+.grid-table th.grid-label-col { background: var(--card); z-index: 3; }
+.grid-label-col a { color: var(--fg); text-decoration: none; }
+.grid-total-col { font-weight: 700; min-width: 56px; }
+.grid-category-row td {
+    text-align: left;
+    background: var(--card2);
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: .7rem;
+    letter-spacing: .04em;
+    position: static;
+}
+.grid-cell { color: var(--muted); }
+.grid-cell.on { color: #7fd79a; background: #17251b; }
+.grid-cell.skip { color: #ff9b9b; background: #251717; }
+
 /* Stats */
 .stat-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .stat-label { flex: 0 0 42%; font-size: .9rem; }
 .bar { flex: 1; height: 10px; background: var(--card2); border-radius: 6px; overflow: hidden; }
 .bar-fill { height: 100%; background: var(--accent); }
 
-/* Bottom nav */
+/* More hub */
+.more-list { display: flex; flex-direction: column; gap: 10px; }
+.more-item {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; color: var(--fg); text-decoration: none; font-size: 1rem;
+}
+.more-item span { font-size: 1.3rem; }
+
+/* Checkers management */
+.checker-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 10px 12px; margin-bottom: 8px; flex-wrap: wrap;
+}
+.checker-edit { display: flex; gap: 8px; align-items: center; flex: 1; flex-wrap: wrap; }
+.checker-edit input { width: auto; flex: 1; min-width: 90px; padding: 8px 10px; }
+.type-pill {
+    background: var(--card2); color: var(--muted); border-radius: 999px;
+    padding: 4px 10px; font-size: .75rem; white-space: nowrap;
+}
+
+/* Bottom nav (mobile) */
 .bottomnav {
     position: fixed;
     left: 0; right: 0; bottom: 0;
     max-width: 640px;
     margin: 0 auto;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     background: var(--card);
     border-top: 1px solid var(--border);
     padding-bottom: env(safe-area-inset-bottom);
@@ -236,3 +349,35 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 }
 .login-card { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 14px; }
 .login-card h1 { margin: 0 0 6px; text-align: center; }
+
+/* Desktop layout: sidebar nav instead of bottom bar, wider content */
+@media (min-width: 900px) {
+    .shell { padding: 0 24px; }
+    .sidenav {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        width: 220px;
+        flex: 0 0 auto;
+        padding: 24px 12px;
+        border-right: 1px solid var(--border);
+        position: sticky;
+        top: 0;
+        height: 100vh;
+    }
+    .sidenav-brand { font-size: 1.1rem; font-weight: 700; padding: 8px 12px 20px; }
+    .sidenav a {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 12px; border-radius: 10px;
+        color: var(--muted); text-decoration: none; font-size: .95rem;
+    }
+    .sidenav a span { font-size: 1.1rem; }
+    .sidenav a.on { color: var(--fg); background: var(--card); }
+    .sidenav a:hover { background: var(--card2); }
+    .sidenav-logout { margin-top: auto; }
+
+    .app { max-width: none; padding-bottom: 40px; padding-left: 12px; padding-right: 12px; }
+    .bottomnav { display: none; }
+    .content { padding: 24px 8px; max-width: 900px; }
+    .checker-form, .event-form { max-width: 480px; }
+}

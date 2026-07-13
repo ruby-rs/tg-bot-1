@@ -1,16 +1,52 @@
 <div id="checkers">
-    <p class="muted counter">Отмечено сегодня: <b>{{ done }}/{{ total }}</b></p>
+    {% if total %}<p class="muted counter">Отмечено сегодня: <b>{{ done }}/{{ total }}</b></p>{% endif %}
     {% for category, items in groups %}
     <div class="group">
         <div class="group-title">{{ category }}</div>
         {% for h in items %}
-        <button class="checker {{ STATUS_CLASS[h['status']] }}"
-                hx-post="/checker/{{ h['id'] }}/toggle"
-                hx-vals='{"day": "{{ day }}"}'
-                hx-target="#checkers" hx-swap="outerHTML">
-            <span class="mark">{{ STATUS_LABEL[h['status']] }}</span>
-            <span class="label">{{ h['title'] }}</span>
-        </button>
+            {% if h['type'] == 'bool' %}
+            <button class="checker {{ STATUS_CLASS[h['status']] }}"
+                    hx-post="/checker/{{ h['id'] }}/toggle"
+                    hx-vals='{"day": "{{ day }}"}'
+                    hx-target="#checkers" hx-swap="outerHTML">
+                <span class="mark">{{ STATUS_LABEL[h['status']] }}</span>
+                <span class="label">{{ h['title'] }}</span>
+            </button>
+
+            {% elif h['type'] == 'number' %}
+            <form class="checker number-checker {{ 'done' if h['value'] is not none }}"
+                  hx-post="/checker/{{ h['id'] }}/value" hx-target="#checkers" hx-swap="outerHTML">
+                <input type="hidden" name="day" value="{{ day }}">
+                <span class="label">{{ h['title'] }}{% if h['target'] %} <small class="muted">(цель {{ h['target']|round(1) }}{{ h['unit'] or '' }})</small>{% endif %}</span>
+                <input type="number" step="any" name="value" class="number-input"
+                       value="{{ h['value'] if h['value'] is not none else '' }}"
+                       placeholder="{{ h['unit'] or 'число' }}" inputmode="decimal">
+                <button type="submit" class="btn tiny">OK</button>
+            </form>
+
+            {% else %}
+            <div class="checker note-checker">
+                <div class="note-head">
+                    <span class="label">{{ h['title'] }}</span>
+                    {% set items_list = entries_by_habit.get(h['id'], []) %}
+                    {% if items_list %}<span class="badge">{{ items_list|length }}</span>{% endif %}
+                </div>
+                {% for entry in entries_by_habit.get(h['id'], []) %}
+                <div class="note-entry">
+                    <span>{{ entry['text'] }}</span>
+                    <form hx-post="/entry/{{ entry['id'] }}/delete" hx-target="#checkers" hx-swap="outerHTML" class="inline">
+                        <input type="hidden" name="day" value="{{ day }}">
+                        <button class="btn tiny danger" type="submit">✕</button>
+                    </form>
+                </div>
+                {% endfor %}
+                <form class="note-add" hx-post="/checker/{{ h['id'] }}/entry" hx-target="#checkers" hx-swap="outerHTML">
+                    <input type="hidden" name="day" value="{{ day }}">
+                    <input type="text" name="text" placeholder="Добавить запись…">
+                    <button type="submit" class="btn tiny">+</button>
+                </form>
+            </div>
+            {% endif %}
         {% endfor %}
     </div>
     {% endfor %}
